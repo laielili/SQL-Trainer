@@ -1,0 +1,87 @@
+id: shop-funnel-004
+dataset: shop
+scenario: funnel
+chain: shop-funnel-chain-a
+chain_step: 4
+title: 分渠道漏斗对比（含未知渠道）
+
+business_prompt: |
+  渠道复盘：“2025 年按事件上报的渠道分组，比较『浏览商品 → 支付成功』的整体转化率。
+   埋点里有一部分事件没带渠道，这部分单独归到『未知』，不能直接丢掉。”
+
+context_notes:
+  - 渠道取 events.channel_id 关联 dim_channel.channel_name；channel_id 为 NULL 时输出 '未知'
+  - view_users / pay_users 都是去重用户数
+  - conv_rate = pay_users / view_users，分母为 0 时返回 NULL
+
+tables: [events, dim_channel]
+
+expected_columns:
+  - {name: channel_name, type: string}
+  - {name: view_users, type: int}
+  - {name: pay_users, type: int}
+  - {name: conv_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_not_match:
+    - pattern: "(?is)channel_id\\s+is\\s+not\\s+null"
+      message: 未知渠道要保留并归为 '未知'，不要过滤掉
+
+hints:
+  - 关联维表必须用 LEFT JOIN，否则 channel_id 为 NULL 的事件会被 INNER JOIN 丢掉。
+  - 用 COALESCE(c.channel_name, '未知') 兜底空值，并且要 GROUP BY 这个表达式。
+  - 两个人数都用 COUNT(DISTINCT CASE WHEN ... THEN user_id END) 一次算完。
+
+reference_sql: |
+  SELECT COALESCE(c.channel_name, '未知') AS channel_name,
+         COUNT(DISTINCT CASE WHEN e.event_name = 'view_product'
+                             THEN e.user_id END) AS view_users,
+         COUNT(DISTINCT CASE WHEN e.event_name = 'pay_success'
+                             THEN e.user_id END) AS pay_users,
+         ROUND(COUNT(DISTINCT CASE WHEN e.event_name = 'pay_success'
+                                   THEN e.user_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT CASE WHEN e.event_name = 'view_product'
+                                          THEN e.user_id END), 0), 4) AS conv_rate
+  FROM events e
+  LEFT JOIN dim_channel c ON c.channel_id = e.channel_id
+  WHERE e.event_time >= '2025-01-01'
+    AND e.event_time <  '2026-01-01'
+    AND e.event_name IN ('view_product', 'pay_success')
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    WITH ev AS (
+        SELECT COALESCE(c.channel_name, '未知') AS channel_name,
+               e.event_name,
+               e.user_id
+        FROM events e
+        LEFT JOIN dim_channel c ON c.channel_id = e.channel_id
+        WHERE e.event_name IN ('view_product', 'pay_success')
+          AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+    )
+    SELECT channel_name,
+           COUNT(DISTINCT CASE WHEN event_name = 'view_product' THEN user_id END) AS view_users,
+           COUNT(DISTINCT CASE WHEN event_name = 'pay_success'  THEN user_id END) AS pay_users,
+           ROUND(COUNT(DISTINCT CASE WHEN event_name = 'pay_success' THEN user_id END) * 1.0
+               / NULLIF(COUNT(DISTINCT CASE WHEN event_name = 'view_product' THEN user_id END), 0),
+               4) AS conv_rate
+    FROM ev
+    GROUP BY channel_name
+    ORDER BY channel_name;
+
+explanation: |
+  1. 维度补空：埋点缺失渠道是常态，COALESCE 兜底比过滤更能反映真实盘子。
+  2. LEFT JOIN + COALESCE 是“保留残缺维度”的标准组合。
+  3. 分组键写表达式时，GROUP BY 也要跟着写表达式（或用序号 GROUP BY 1）。
+
+pitfalls:
+  - 用 INNER JOIN dim_channel，未知渠道的用户凭空消失，各渠道之和 ≠ 总量
+  - GROUP BY c.channel_name（原始列）而不是 COALESCE 后的表达式，NULL 单独成组且显示为空
+  - 一个用户在多个渠道都有事件时被重复计数——这是渠道口径的固有特性，需要在结论里说明
+
+capability_points: [funnel.by_dimension, funnel.conv_rate, agg.null_handling]

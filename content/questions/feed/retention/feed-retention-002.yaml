@@ -1,0 +1,97 @@
+id: feed-retention-002
+dataset: feed
+scenario: retention
+chain: feed-retention-chain-a
+chain_step: 2
+title: 月度粘性 DAU/MAU
+
+business_prompt: |
+  产品周会固定看粘性：“2025 年每个月，给我平均日活（当月各天 DAU 的均值）、
+   月活 MAU（当月去重活跃人数），以及粘性 = 平均DAU / MAU。”
+
+context_notes:
+  - DAU = 某天的去重活跃用户数；MAU = 整月的去重活跃用户数（不是各天 DAU 之和）
+  - 平均 DAU 保留 2 位小数，粘性保留 4 位小数
+  - MAU 必须单独去重统计，不能用 SUM(DAU)
+
+tables: [daily_active]
+
+expected_columns:
+  - {name: ym, type: string}
+  - {name: avg_dau, type: decimal, tolerance: 0.01}
+  - {name: mau, type: int}
+  - {name: stickiness, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 两个不同粒度的指标，最稳的做法是分别算成两张表再 JOIN。
+  - DAU 表按 stat_date 聚合，MAU 表按月聚合，两边都用 COUNT(DISTINCT user_id)。
+  - 平均 DAU 是对 DAU 表按月求 AVG，不是 SUM。
+
+reference_sql: |
+  WITH dau AS (
+      SELECT stat_date,
+             COUNT(DISTINCT user_id) AS dau
+      FROM daily_active
+      WHERE stat_date >= '2025-01-01' AND stat_date < '2026-01-01'
+      GROUP BY stat_date
+  ),
+  mau AS (
+      SELECT DATE_FORMAT(stat_date, '%Y-%m') AS ym,
+             COUNT(DISTINCT user_id) AS mau
+      FROM daily_active
+      WHERE stat_date >= '2025-01-01' AND stat_date < '2026-01-01'
+      GROUP BY 1
+  )
+  SELECT m.ym,
+         ROUND(AVG(d.dau), 2) AS avg_dau,
+         m.mau,
+         ROUND(AVG(d.dau) / NULLIF(m.mau, 0), 4) AS stickiness
+  FROM mau m
+  JOIN dau d ON DATE_FORMAT(d.stat_date, '%Y-%m') = m.ym
+  GROUP BY m.ym, m.mau
+  ORDER BY m.ym;
+
+alt_solutions:
+  - |
+    WITH dau AS (
+        SELECT DATE_FORMAT(stat_date, '%Y-%m') AS ym,
+               stat_date,
+               COUNT(DISTINCT user_id) AS dau
+        FROM daily_active
+        WHERE stat_date >= '2025-01-01' AND stat_date < '2026-01-01'
+        GROUP BY 1, 2
+    ),
+    dau_m AS (
+        SELECT ym, AVG(dau) AS avg_dau FROM dau GROUP BY ym
+    ),
+    mau AS (
+        SELECT DATE_FORMAT(stat_date, '%Y-%m') AS ym,
+               COUNT(DISTINCT user_id) AS mau
+        FROM daily_active
+        WHERE stat_date >= '2025-01-01' AND stat_date < '2026-01-01'
+        GROUP BY 1
+    )
+    SELECT a.ym,
+           ROUND(a.avg_dau, 2) AS avg_dau,
+           b.mau,
+           ROUND(a.avg_dau / NULLIF(b.mau, 0), 4) AS stickiness
+    FROM dau_m a
+    JOIN mau b ON b.ym = a.ym
+    ORDER BY a.ym;
+
+explanation: |
+  1. DAU 与 MAU 是不同粒度的去重，天然不能互相加总推导。
+  2. 跨粒度指标放一行，标准做法是各自聚合成表后按公共键 JOIN。
+  3. 粘性 = 平均DAU/MAU，衡量“一个月活用户一个月来几天”，值越高越健康。
+
+pitfalls:
+  - 用 SUM(DAU) 当 MAU，同一用户来 10 天被算 10 个人
+  - 用 COUNT(DISTINCT user_id) 直接按月分组当作“平均 DAU”，混淆了两个粒度
+  - JOIN 条件写成日期相等而不是月份相等，结果为空
+
+capability_points: [retention.stickiness, agg.grain_mismatch, agg.distinct_count]

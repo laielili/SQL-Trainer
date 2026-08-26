@@ -1,0 +1,110 @@
+id: saas-funnel-002
+dataset: saas
+scenario: funnel
+chain: saas-funnel-chain-a
+chain_step: 2
+title: 功能使用有序漏斗 dashboard→report→export
+
+business_prompt: |
+  产品要看深度使用路径：“2025 年，账号必须先用过 dashboard、再用过 report、
+   最后用过 export，时间严格往后走才算走通。给我三步的账号数
+   以及每一步相对上一步的转化率。”
+
+context_notes:
+  - 主体是账号；每步时间取该账号该功能的最早使用时间 MIN(use_time)
+  - 严格递增：t2 > t1，t3 > t2
+  - 第 1 步的 conv_rate 为 NULL
+
+tables: [feature_usage]
+
+expected_columns:
+  - {name: step_no, type: int}
+  - {name: step_name, type: string}
+  - {name: account_cnt, type: int}
+  - {name: conv_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\bover\\s*\\("
+      message: 相邻步骤转化率请用窗口函数 LAG 实现
+
+hints:
+  - 第一步压平：GROUP BY account_id，三个条件 MIN(use_time)。
+  - 第二步用 UNION ALL 造出三行 (step_no, step_name, account_cnt)。
+  - 第三步在这张三行小表上 LAG(account_cnt) OVER (ORDER BY step_no) 算转化率。
+
+reference_sql: |
+  WITH acc AS (
+      SELECT account_id,
+             MIN(CASE WHEN feature_code = 'dashboard' THEN use_time END) AS t1,
+             MIN(CASE WHEN feature_code = 'report'    THEN use_time END) AS t2,
+             MIN(CASE WHEN feature_code = 'export'    THEN use_time END) AS t3
+      FROM feature_usage
+      WHERE use_time >= '2025-01-01'
+        AND use_time <  '2026-01-01'
+      GROUP BY account_id
+  ),
+  steps AS (
+      SELECT 1 AS step_no, 'dashboard' AS step_name, COUNT(*) AS account_cnt
+      FROM acc WHERE t1 IS NOT NULL
+      UNION ALL
+      SELECT 2, 'report', COUNT(*)
+      FROM acc WHERE t1 IS NOT NULL AND t2 > t1
+      UNION ALL
+      SELECT 3, 'export', COUNT(*)
+      FROM acc WHERE t1 IS NOT NULL AND t2 > t1 AND t3 > t2
+  )
+  SELECT step_no,
+         step_name,
+         account_cnt,
+         ROUND(account_cnt * 1.0
+             / NULLIF(LAG(account_cnt) OVER (ORDER BY step_no), 0), 4) AS conv_rate
+  FROM steps
+  ORDER BY step_no;
+
+alt_solutions:
+  - |
+    WITH acc AS (
+        SELECT account_id,
+               MIN(CASE WHEN feature_code = 'dashboard' THEN use_time END) AS t1,
+               MIN(CASE WHEN feature_code = 'report'    THEN use_time END) AS t2,
+               MIN(CASE WHEN feature_code = 'export'    THEN use_time END) AS t3
+        FROM feature_usage
+        WHERE use_time >= '2025-01-01' AND use_time < '2026-01-01'
+        GROUP BY account_id
+    ),
+    flag AS (
+        SELECT CASE WHEN t1 IS NOT NULL THEN 1 ELSE 0 END AS s1,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 THEN 1 ELSE 0 END AS s2,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 AND t3 > t2 THEN 1 ELSE 0 END AS s3
+        FROM acc
+    ),
+    steps AS (
+        SELECT 1 AS step_no, 'dashboard' AS step_name, SUM(s1) AS account_cnt FROM flag
+        UNION ALL SELECT 2, 'report', SUM(s2) FROM flag
+        UNION ALL SELECT 3, 'export', SUM(s3) FROM flag
+    ),
+    w AS (
+        SELECT step_no, step_name, account_cnt,
+               LAG(account_cnt) OVER (ORDER BY step_no) AS prev_cnt
+        FROM steps
+    )
+    SELECT step_no, step_name, account_cnt,
+           ROUND(account_cnt * 1.0 / NULLIF(prev_cnt, 0), 4) AS conv_rate
+    FROM w
+    ORDER BY step_no;
+
+explanation: |
+  1. 有序漏斗 + 转化率 = 压平 → 逐层收窄 → 小表上开窗，三段式非常稳定。
+  2. 在只有 3 行的小表上用窗口函数，代价可以忽略，可读性远好于自连接。
+  3. 时间比较用严格大于，等于视为“同时发生”，不构成先后关系。
+
+pitfalls:
+  - 用 >= 比较时间，同一秒内批量写入的日志被误判为有先后
+  - 三步各自独立统计（不继承前置条件），转化率可能大于 1
+  - 忘记时间范围过滤，2024 年的使用记录混进 2025 年的漏斗
+
+capability_points: [funnel.ordered, funnel.flatten, funnel.conv_rate, window.lag]

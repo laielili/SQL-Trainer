@@ -1,0 +1,78 @@
+id: shop-agg-002
+dataset: shop
+scenario: agg
+chain: shop-agg-chain-a
+chain_step: 2
+title: 2025 年各渠道实付 GMV 占比
+
+business_prompt: |
+  渠道运营要看结构：“拉一下 2025 年各渠道的实付 GMV，以及每个渠道占总 GMV 的比例（百分比）。
+   我要看钱主要从哪个渠道来。”
+
+context_notes:
+  - 实付 = order_items.item_amount 之和；排除 cancelled/refunded
+  - 占比 = 渠道 GMV / 全部渠道 GMV 之和（用窗口函数或子查询算总盘）
+  - 渠道名来自 dim_channel
+
+tables: [orders, order_items, dim_channel]
+
+expected_columns:
+  - {name: channel_name, type: string}
+  - {name: gmv, type: decimal, tolerance: 0.01}
+  - {name: gmv_ratio, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 先按渠道聚合出 GMV（子查询/CTE）。
+  - 总盘怎么算？可以用 SUM(gmv) OVER () 窗口函数，不分组地求全体和。
+  - 占比 = 渠道 GMV / 全体 GMV，用 NULLIF 防除零。
+
+reference_sql: |
+  WITH gmv_by_ch AS (
+      SELECT c.channel_name, SUM(oi.item_amount) AS gmv
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN dim_channel c ON c.channel_id = o.channel_id
+      WHERE o.status NOT IN ('cancelled', 'refunded')
+        AND o.pay_time IS NOT NULL
+      GROUP BY c.channel_name
+  )
+  SELECT channel_name, gmv,
+         ROUND(gmv / SUM(gmv) OVER (), 4) AS gmv_ratio
+  FROM gmv_by_ch
+  ORDER BY gmv DESC;
+
+alt_solutions:
+  - |
+    SELECT t.channel_name, t.gmv, ROUND(t.gmv / s.total, 4) AS gmv_ratio
+    FROM (
+        SELECT c.channel_name, SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        JOIN dim_channel c ON c.channel_id = o.channel_id
+        WHERE o.status NOT IN ('cancelled', 'refunded') AND o.pay_time IS NOT NULL
+        GROUP BY c.channel_name
+    ) t
+    CROSS JOIN (
+        SELECT SUM(oi.item_amount) AS total
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        WHERE o.status NOT IN ('cancelled', 'refunded') AND o.pay_time IS NOT NULL
+    ) s
+    ORDER BY t.gmv DESC;
+
+explanation: |
+  1. 聚合：先按渠道算出 GMV。
+  2. 总盘：SUM(gmv) OVER () 不加 PARTITION，得到全体之和。
+  3. 占比：渠道 / 全体，NULLIF 防除零。
+
+pitfalls:
+  - 用 COUNT(*)/COUNT(*) 当占比（那是个数比例不是金额比例）
+  - 总盘用子查询但忘了 JOIN 条件导致笛卡尔积
+  - 忘记排除 cancelled/refunded
+
+capability_points: [agg.ratio, agg.multi_group]

@@ -1,0 +1,98 @@
+id: shop-pivot-004
+dataset: shop
+scenario: pivot
+chain: shop-pivot-chain-a
+chain_step: 4
+title: 每个品类的 Top3 城市折叠成一行（字符串聚合）
+
+business_prompt: |
+  周报要一句话概括：“2025 年每个一级品类，按 GMV 取前 3 名城市，
+   把城市名用逗号拼成一列，形如『上海,北京,深圳』，按品类名升序。”
+
+context_notes:
+  - 城市来自 users.city_id → dim_city.city_name；users.city_id 可能为 NULL，这类订单直接剔除
+  - GMV = order_items.item_amount；排除 cancelled/refunded，pay_time 非空
+  - 拼接顺序必须按 GMV 从高到低；GMV 相同时按 city_name 升序保证结果确定
+
+tables: [orders, order_items, users, dim_city]
+
+expected_columns:
+  - {name: cat_l1, type: string}
+  - {name: top3_cities, type: string}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)group_concat\\s*\\("
+      message: 请用 GROUP_CONCAT 做字符串聚合
+
+hints:
+  - 分三步：先算「品类 × 城市」的 GMV，再用 ROW_NUMBER 排名，最后 GROUP_CONCAT 拼接。
+  - GROUP_CONCAT 支持内部排序：GROUP_CONCAT(city_name ORDER BY rn SEPARATOR ',')。
+  - 排名要加第二排序键（city_name），否则并列时结果不稳定。
+
+reference_sql: |
+  WITH cat_city AS (
+      SELECT p.cat_l1,
+             ci.city_name,
+             SUM(oi.item_amount) AS gmv
+      FROM order_items oi
+      JOIN orders o      ON o.order_id = oi.order_id
+      JOIN dim_product p ON p.product_id = oi.product_id
+      JOIN users u       ON u.user_id = o.user_id
+      JOIN dim_city ci   ON ci.city_id = u.city_id
+      WHERE o.order_time >= '2025-01-01'
+        AND o.order_time <  '2026-01-01'
+        AND o.status NOT IN ('cancelled', 'refunded')
+        AND o.pay_time IS NOT NULL
+      GROUP BY 1, 2
+  ),
+  ranked AS (
+      SELECT cat_l1, city_name, gmv,
+             ROW_NUMBER() OVER (PARTITION BY cat_l1 ORDER BY gmv DESC, city_name ASC) AS rn
+      FROM cat_city
+  )
+  SELECT cat_l1,
+         GROUP_CONCAT(city_name ORDER BY rn SEPARATOR ',') AS top3_cities
+  FROM ranked
+  WHERE rn <= 3
+  GROUP BY cat_l1
+  ORDER BY cat_l1;
+
+alt_solutions:
+  - |
+    SELECT cat_l1,
+           GROUP_CONCAT(city_name ORDER BY rn SEPARATOR ',') AS top3_cities
+    FROM (
+        SELECT t.cat_l1, t.city_name,
+               ROW_NUMBER() OVER (PARTITION BY t.cat_l1 ORDER BY t.gmv DESC, t.city_name) AS rn
+        FROM (
+            SELECT p.cat_l1, ci.city_name, SUM(oi.item_amount) AS gmv
+            FROM orders o
+            JOIN order_items oi ON oi.order_id = o.order_id
+            JOIN dim_product p  ON p.product_id = oi.product_id
+            JOIN users u        ON u.user_id = o.user_id
+            JOIN dim_city ci    ON ci.city_id = u.city_id
+            WHERE o.status NOT IN ('cancelled', 'refunded')
+              AND o.pay_time IS NOT NULL
+              AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+            GROUP BY 1, 2
+        ) t
+    ) r
+    WHERE rn <= 3
+    GROUP BY cat_l1
+    ORDER BY cat_l1;
+
+explanation: |
+  1. 这是“行转列”的另一种形态：不是变成多列，而是折叠进一个字符串单元格。
+  2. GROUP_CONCAT 的 ORDER BY 只作用于拼接顺序，与外层 ORDER BY 无关。
+  3. 必须先 ROW_NUMBER 再过滤 rn<=3，窗口函数不能直接写在 WHERE 里。
+
+pitfalls:
+  - 把 ROW_NUMBER() <= 3 写进 WHERE，MySQL 会报错（窗口函数不能出现在 WHERE）
+  - GROUP_CONCAT 不加 ORDER BY，拼接顺序随执行计划变化
+  - JOIN users 时忽略 city_id 为 NULL 的情况（INNER JOIN 会自动剔除，要清楚这一点）
+
+capability_points: [pivot.string_agg, window.row_number, window.filter_after_rank]

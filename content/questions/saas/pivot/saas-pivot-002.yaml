@@ -1,0 +1,85 @@
+id: saas-pivot-002
+dataset: saas
+scenario: pivot
+chain: saas-pivot-chain-a
+chain_step: 2
+title: 行业 × 半年度 的开票金额与回收率双指标透视
+
+business_prompt: |
+  财务看半年报：“行是行业，列要上半年和下半年各两个指标：开票金额、回收率。
+   数据取 2025 年，按行业名升序。”
+
+context_notes:
+  - 上半年 = bill_date 在 1~6 月，下半年 = 7~12 月
+  - 回收率 = 该半年内已回款金额 / 该半年内开票金额，保留 4 位小数
+  - 金额保留 2 位小数；列名 h1_billed / h1_collect_rate / h2_billed / h2_collect_rate
+
+tables: [accounts, invoices]
+
+expected_columns:
+  - {name: industry, type: string}
+  - {name: h1_billed, type: decimal, tolerance: 0.01}
+  - {name: h1_collect_rate, type: decimal, tolerance: 0.0001}
+  - {name: h2_billed, type: decimal, tolerance: 0.01}
+  - {name: h2_collect_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 比率型的透视格子 = 两个条件聚合相除，分子分母都要带上同一个半年条件。
+  - 分子还要额外叠加 paid 条件，相当于两层条件嵌套。
+  - 用 MONTH(bill_date) <= 6 判断上半年最直观。
+
+reference_sql: |
+  SELECT a.industry,
+         ROUND(SUM(CASE WHEN MONTH(i.bill_date) <= 6 THEN i.amount ELSE 0 END), 2) AS h1_billed,
+         ROUND(SUM(CASE WHEN MONTH(i.bill_date) <= 6 AND i.paid THEN i.amount ELSE 0 END)
+             / NULLIF(SUM(CASE WHEN MONTH(i.bill_date) <= 6 THEN i.amount ELSE 0 END), 0),
+             4) AS h1_collect_rate,
+         ROUND(SUM(CASE WHEN MONTH(i.bill_date) >= 7 THEN i.amount ELSE 0 END), 2) AS h2_billed,
+         ROUND(SUM(CASE WHEN MONTH(i.bill_date) >= 7 AND i.paid THEN i.amount ELSE 0 END)
+             / NULLIF(SUM(CASE WHEN MONTH(i.bill_date) >= 7 THEN i.amount ELSE 0 END), 0),
+             4) AS h2_collect_rate
+  FROM invoices i
+  JOIN accounts a ON a.account_id = i.account_id
+  WHERE i.bill_date >= '2025-01-01'
+    AND i.bill_date <  '2026-01-01'
+  GROUP BY a.industry
+  ORDER BY a.industry;
+
+alt_solutions:
+  - |
+    WITH base AS (
+        SELECT a.industry,
+               CASE WHEN MONTH(i.bill_date) <= 6 THEN 'h1' ELSE 'h2' END AS half,
+               i.amount,
+               i.paid
+        FROM invoices i
+        JOIN accounts a ON a.account_id = i.account_id
+        WHERE i.bill_date >= '2025-01-01' AND i.bill_date < '2026-01-01'
+    )
+    SELECT industry,
+           ROUND(SUM(CASE WHEN half = 'h1' THEN amount ELSE 0 END), 2) AS h1_billed,
+           ROUND(SUM(CASE WHEN half = 'h1' AND paid THEN amount ELSE 0 END)
+               / NULLIF(SUM(CASE WHEN half = 'h1' THEN amount ELSE 0 END), 0), 4) AS h1_collect_rate,
+           ROUND(SUM(CASE WHEN half = 'h2' THEN amount ELSE 0 END), 2) AS h2_billed,
+           ROUND(SUM(CASE WHEN half = 'h2' AND paid THEN amount ELSE 0 END)
+               / NULLIF(SUM(CASE WHEN half = 'h2' THEN amount ELSE 0 END), 0), 4) AS h2_collect_rate
+    FROM base
+    GROUP BY industry
+    ORDER BY industry;
+
+explanation: |
+  1. 多指标透视 = 每个「列维度取值 × 指标」组合各占一列，列数会乘起来。
+  2. 比率型格子必须让分子分母共享同一个列维度条件，否则口径串了都不报错。
+  3. 把列维度先算成一个标签列（alt 写法），后面写条件聚合更不容易写错。
+
+pitfalls:
+  - 分子带了半年条件、分母没带，回收率变成“半年回款 / 全年开票”
+  - 用 SUM(paid) 当分子，统计的是笔数不是金额
+  - 半年划分写成 MONTH <= 6 与 MONTH > 6 不成对，边界月重复或遗漏
+
+capability_points: [pivot.multi_metric, pivot.ratio_cell, pivot.conditional_agg, agg.safe_div]

@@ -1,0 +1,62 @@
+id: shop-funnel-001
+dataset: shop
+scenario: funnel
+chain: shop-funnel-chain-a
+chain_step: 1
+title: 浏览-加购-提交-支付 无序漏斗人数
+
+business_prompt: |
+  增长同学要基础漏斗：“统计 2025 年发生过『浏览商品 / 加购 / 提交订单 / 支付成功』
+   这四类事件的去重用户数，按人数从多到少排。先不要求先后次序。”
+
+context_notes:
+  - 四类事件名：view_product / add_cart / submit_order / pay_success
+  - 无序漏斗：只统计“这个人是否发生过该事件”，不要求事件按时间先后
+  - 人数 = COUNT(DISTINCT user_id)；同一用户同一事件多次只算一次
+
+tables: [events]
+
+expected_columns:
+  - {name: event_name, type: string}
+  - {name: user_cnt, type: int}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 用 WHERE event_name IN (...) 圈定四步，GROUP BY event_name。
+  - 每步人数是 COUNT(DISTINCT user_id)，不是 COUNT(*)。
+  - “无序”意味着不需要检查事件先后顺序，先做各步规模的基线。
+
+reference_sql: |
+  SELECT event_name,
+         COUNT(DISTINCT user_id) AS user_cnt
+  FROM events
+  WHERE event_name IN ('view_product', 'add_cart', 'submit_order', 'pay_success')
+    AND event_time >= '2025-01-01'
+    AND event_time <  '2026-01-01'
+  GROUP BY event_name
+  ORDER BY user_cnt DESC;
+
+alt_solutions:
+  - |
+    SELECT e.event_name, COUNT(DISTINCT e.user_id) AS user_cnt
+    FROM events e
+    WHERE e.event_time BETWEEN '2025-01-01' AND '2025-12-31 23:59:59'
+      AND e.event_name IN ('view_product','add_cart','submit_order','pay_success')
+    GROUP BY e.event_name
+    ORDER BY user_cnt DESC;
+
+explanation: |
+  1. 无序漏斗：每步独立统计发生过该事件的去重用户，不约束先后顺序。
+  2. 去重：COUNT(DISTINCT user_id) 是漏斗人数口径，避免重复事件放大。
+  3. 范围：用 event_time 圈定 2025 年，与环比/留存口径一致。
+
+pitfalls:
+  - 用 COUNT(*) 而非 COUNT(DISTINCT user_id)，被重复埋点放大
+  - 把四步硬写成一列（CASE WHEN），会丢掉“每步一行”的漏斗结构
+  - 忘记限定 2025 年，混入其他年份数据
+
+capability_points: [funnel.unordered, funnel.step_vs_total]

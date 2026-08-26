@@ -1,0 +1,89 @@
+id: feed-retention-001
+dataset: feed
+scenario: retention
+chain: feed-retention-chain-a
+chain_step: 1
+title: 首次活跃分群的次日留存（日活快照口径）
+
+business_prompt: |
+  用户增长看新客质量：“用日活快照表，把每个用户第一次出现在日活里的那天当作他的『首活日』，
+   按首活月份分群，统计分群人数、次日仍然活跃的人数和次日留存率。”
+
+context_notes:
+  - daily_active 是“某天某用户活跃”的快照，一天一用户一行
+  - 首活日 = MIN(stat_date)，不要用 is_new 字段（该字段是埋点噪声，同一用户可能多次为真）
+  - 次日活跃 = 存在 stat_date = 首活日 + 1 天的记录
+  - 分群范围 2024-01-01 ~ 2025-12-30
+
+tables: [daily_active]
+
+expected_columns:
+  - {name: cohort_month, type: string}
+  - {name: cohort_users, type: int}
+  - {name: d1_users, type: int}
+  - {name: d1_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 第一步用 GROUP BY user_id + MIN(stat_date) 求出每人的首活日。
+  - 第二步用 LEFT JOIN 回 daily_active，条件是日期正好等于首活日 + 1 天。
+  - LEFT JOIN 而不是 INNER JOIN，否则分母只剩留下来的人。
+
+reference_sql: |
+  WITH first_act AS (
+      SELECT user_id, MIN(stat_date) AS fd
+      FROM daily_active
+      GROUP BY user_id
+  )
+  SELECT DATE_FORMAT(f.fd, '%Y-%m') AS cohort_month,
+         COUNT(DISTINCT f.user_id) AS cohort_users,
+         COUNT(DISTINCT d.user_id) AS d1_users,
+         ROUND(COUNT(DISTINCT d.user_id) * 1.0
+             / NULLIF(COUNT(DISTINCT f.user_id), 0), 4) AS d1_rate
+  FROM first_act f
+  LEFT JOIN daily_active d
+         ON d.user_id = f.user_id
+        AND d.stat_date = DATE_ADD(f.fd, INTERVAL 1 DAY)
+  WHERE f.fd >= '2024-01-01'
+    AND f.fd <= '2025-12-30'
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    WITH first_act AS (
+        SELECT user_id, MIN(stat_date) AS fd
+        FROM daily_active GROUP BY user_id
+    ),
+    joined AS (
+        SELECT f.user_id,
+               f.fd,
+               MAX(CASE WHEN DATEDIFF(d.stat_date, f.fd) = 1 THEN 1 ELSE 0 END) AS retained
+        FROM first_act f
+        LEFT JOIN daily_active d ON d.user_id = f.user_id
+        WHERE f.fd >= '2024-01-01' AND f.fd <= '2025-12-30'
+        GROUP BY f.user_id, f.fd
+    )
+    SELECT DATE_FORMAT(fd, '%Y-%m') AS cohort_month,
+           COUNT(*) AS cohort_users,
+           SUM(retained) AS d1_users,
+           ROUND(SUM(retained) * 1.0 / NULLIF(COUNT(*), 0), 4) AS d1_rate
+    FROM joined
+    GROUP BY 1
+    ORDER BY 1;
+
+explanation: |
+  1. 留存三要素：锚点（首活日）、观察窗口（+1 天）、分母（分群总人数）。
+  2. 锚点靠自聚合求出，别信数据里现成的 is_new 标记——脏数据是常态。
+  3. LEFT JOIN 是分母不塌陷的保证，这一点在所有留存题里都成立。
+
+pitfalls:
+  - 用 is_new 当锚点，同一用户被多次判定为新增，分群人数虚高
+  - INNER JOIN 导致分母只剩留存用户，留存率恒为 100%
+  - 日期加减写成字符串拼接，无法正确对齐
+
+capability_points: [retention.anchor, retention.nday, retention.denominator]

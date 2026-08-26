@@ -1,0 +1,83 @@
+id: feed-growth-002
+dataset: feed
+scenario: growth
+chain: feed-growth-chain-a
+chain_step: 2
+title: 各分类互动量年度同比
+
+business_prompt: |
+  内容策略复盘：“把点赞、评论、转发合在一起当『互动量』，
+   按话题分类比较 2025 年和 2024 年的互动量与同比增长率，按分类名升序。”
+
+context_notes:
+  - 互动事件 = event_name IN ('like','comment','share')
+  - 分类通过 events.content_id → contents.topic_id → topics.category 关联
+  - 同比 = (2025 - 2024) / 2024，保留 4 位小数
+
+tables: [events, contents, topics]
+
+expected_columns:
+  - {name: category, type: string}
+  - {name: cnt_2025, type: int}
+  - {name: cnt_2024, type: int}
+  - {name: yoy_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 两种思路：分类×年聚合后自连接对齐，或者一次聚合用两个条件 SUM 直接拉成两列。
+  - 条件聚合写法更短：SUM(CASE WHEN YEAR(event_time)=2025 THEN 1 ELSE 0 END)。
+  - 分母是 2024 年的量，用 NULLIF 保护。
+
+reference_sql: |
+  SELECT t.category,
+         SUM(CASE WHEN YEAR(e.event_time) = 2025 THEN 1 ELSE 0 END) AS cnt_2025,
+         SUM(CASE WHEN YEAR(e.event_time) = 2024 THEN 1 ELSE 0 END) AS cnt_2024,
+         ROUND((SUM(CASE WHEN YEAR(e.event_time) = 2025 THEN 1 ELSE 0 END)
+              - SUM(CASE WHEN YEAR(e.event_time) = 2024 THEN 1 ELSE 0 END)) * 1.0
+             / NULLIF(SUM(CASE WHEN YEAR(e.event_time) = 2024 THEN 1 ELSE 0 END), 0),
+             4) AS yoy_rate
+  FROM events e
+  JOIN contents c ON c.content_id = e.content_id
+  JOIN topics   t ON t.topic_id  = c.topic_id
+  WHERE e.event_name IN ('like', 'comment', 'share')
+  GROUP BY t.category
+  ORDER BY t.category;
+
+alt_solutions:
+  - |
+    WITH inter AS (
+        SELECT t.category,
+               YEAR(e.event_time) AS y,
+               COUNT(*) AS cnt
+        FROM events e
+        JOIN contents c ON c.content_id = e.content_id
+        JOIN topics   t ON t.topic_id  = c.topic_id
+        WHERE e.event_name IN ('like', 'comment', 'share')
+        GROUP BY 1, 2
+    )
+    SELECT cur.category,
+           cur.cnt AS cnt_2025,
+           prev.cnt AS cnt_2024,
+           ROUND((cur.cnt - prev.cnt) * 1.0 / NULLIF(prev.cnt, 0), 4) AS yoy_rate
+    FROM inter cur
+    LEFT JOIN inter prev
+           ON prev.category = cur.category
+          AND prev.y = cur.y - 1
+    WHERE cur.y = 2025
+    ORDER BY cur.category;
+
+explanation: |
+  1. 同比的两种实现：条件聚合“横着展开”，或自连接“错一年对齐”。
+  2. 条件聚合一次扫描即可，但年份写死；自连接更通用，适合多年滚动。
+  3. 注意自连接要用 LEFT JOIN，否则去年没数据的分类整行消失。
+
+pitfalls:
+  - 条件聚合忘了 ELSE 0，SUM 遇到全 NULL 分组返回 NULL 而不是 0
+  - 自连接用 INNER JOIN，新分类（2024 无数据）被吃掉
+  - 把 like/comment/share 分开统计后相加，多写了两倍代码还容易漏
+
+capability_points: [growth.yoy, growth.self_join, agg.conditional_count, growth.safe_div]

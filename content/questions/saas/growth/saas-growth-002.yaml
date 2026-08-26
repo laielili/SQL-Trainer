@@ -1,0 +1,90 @@
+id: saas-growth-002
+dataset: saas
+scenario: growth
+chain: saas-growth-chain-a
+chain_step: 2
+title: 周粒度开票金额环比（借助日期维表）
+
+business_prompt: |
+  财务要更细的节奏：“2025 年按『周』统计开票金额和开票笔数，
+   再给出上一周金额和周环比。周的定义直接用日期维表里的 w 字段，别自己算。”
+
+context_notes:
+  - dim_date.w 是年周序号（形如 202501），已经处理好跨年问题
+  - 开票日 invoices.bill_date 关联 dim_date.date_key
+  - 金额保留 2 位小数，环比保留 4 位小数；首周环比为 NULL
+
+tables: [invoices, dim_date]
+
+expected_columns:
+  - {name: week_key, type: int}
+  - {name: invoice_cnt, type: int}
+  - {name: billed_amount, type: decimal, tolerance: 0.01}
+  - {name: prev_billed, type: decimal, tolerance: 0.01}
+  - {name: wow_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 200
+
+constraints:
+  must_match:
+    - pattern: "(?is)dim_date"
+      message: 周的划分请用日期维表 dim_date.w，不要自己用函数推算
+
+hints:
+  - JOIN dim_date ON date_key = bill_date，直接取 d.w 当分组键。
+  - 环比还是 LAG，只不过排序键从月变成了周序号。
+  - 周序号是整数，字典序即时间序，可以放心 ORDER BY。
+
+reference_sql: |
+  WITH weekly AS (
+      SELECT d.w AS week_key,
+             COUNT(*) AS invoice_cnt,
+             ROUND(SUM(i.amount), 2) AS billed_amount
+      FROM invoices i
+      JOIN dim_date d ON d.date_key = i.bill_date
+      WHERE i.bill_date >= '2025-01-01'
+        AND i.bill_date <  '2026-01-01'
+      GROUP BY d.w
+  )
+  SELECT week_key,
+         invoice_cnt,
+         billed_amount,
+         LAG(billed_amount) OVER (ORDER BY week_key) AS prev_billed,
+         ROUND((billed_amount - LAG(billed_amount) OVER (ORDER BY week_key))
+             / NULLIF(LAG(billed_amount) OVER (ORDER BY week_key), 0), 4) AS wow_rate
+  FROM weekly
+  ORDER BY week_key;
+
+alt_solutions:
+  - |
+    WITH weekly AS (
+        SELECT d.w AS week_key,
+               COUNT(i.invoice_id) AS invoice_cnt,
+               ROUND(SUM(i.amount), 2) AS billed_amount
+        FROM dim_date d
+        JOIN invoices i ON i.bill_date = d.date_key
+        WHERE d.date_key >= '2025-01-01' AND d.date_key < '2026-01-01'
+        GROUP BY d.w
+    ),
+    w AS (
+        SELECT week_key, invoice_cnt, billed_amount,
+               LAG(billed_amount) OVER (ORDER BY week_key) AS prev_billed
+        FROM weekly
+    )
+    SELECT week_key, invoice_cnt, billed_amount, prev_billed,
+           ROUND((billed_amount - prev_billed) / NULLIF(prev_billed, 0), 4) AS wow_rate
+    FROM w
+    ORDER BY week_key;
+
+explanation: |
+  1. 周粒度最容易踩坑（周一/周日起算、跨年周归属），交给日期维表统一定义最稳。
+  2. 环比的实现与月环比完全同构，只是排序键换成周序号。
+  3. 事实表与日期维表 JOIN 是 BI 建模的标准动作，值得形成肌肉记忆。
+
+pitfalls:
+  - 用 WEEK()/YEARWEEK() 自己算周，不同 mode 参数结果不一致
+  - 跨年周被拆成两半，12 月最后一周和 1 月第一周对不上
+  - 用 LEFT JOIN dim_date 但把 invoices 放主表，日期轴补全的意义就没了
+
+capability_points: [growth.wow, growth.date_spine, window.lag, growth.safe_div]

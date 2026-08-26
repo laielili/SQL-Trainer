@@ -1,0 +1,70 @@
+id: shop-agg-003
+dataset: shop
+scenario: agg
+chain: shop-agg-chain-a
+chain_step: 3
+title: 2025 年各品类新品 vs 老品实付对比
+
+business_prompt: |
+  品类运营要拆结构：“2025 年每个一级品类，新品（is_new）和老品的实付 GMV 分别是多少？
+   我要看新品拉动力。”
+
+context_notes:
+  - 实付 = order_items.item_amount 之和；排除 cancelled/refunded
+  - 新品/老品来自 dim_product.is_new（布尔）
+  - 用条件聚合 SUM(CASE WHEN ... THEN item_amount ELSE 0 END) 在同一行拆出两列
+
+tables: [orders, order_items, dim_product]
+
+expected_columns:
+  - {name: cat_l1, type: string}
+  - {name: new_gmv, type: decimal, tolerance: 0.01}
+  - {name: old_gmv, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 一行一个品类，用两个 SUM(CASE WHEN p.is_new THEN ... ELSE 0 END) 拆出新/老品列。
+  - 实付落到 order_items 求和。
+  - 排除 cancelled/refunded。
+
+reference_sql: |
+  SELECT p.cat_l1,
+         SUM(CASE WHEN p.is_new THEN oi.item_amount ELSE 0 END) AS new_gmv,
+         SUM(CASE WHEN NOT p.is_new THEN oi.item_amount ELSE 0 END) AS old_gmv
+  FROM order_items oi
+  JOIN orders o ON o.order_id = oi.order_id
+  JOIN dim_product p ON p.product_id = oi.product_id
+  WHERE o.status NOT IN ('cancelled', 'refunded')
+    AND o.pay_time IS NOT NULL
+    AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+  GROUP BY p.cat_l1
+  ORDER BY p.cat_l1;
+
+alt_solutions:
+  - |
+    SELECT p.cat_l1,
+           SUM(CASE WHEN p.is_new THEN oi.item_amount ELSE 0 END) AS new_gmv,
+           SUM(CASE WHEN NOT p.is_new THEN oi.item_amount ELSE 0 END) AS old_gmv
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.order_id
+    JOIN dim_product p ON p.product_id = oi.product_id
+    WHERE o.status NOT IN ('cancelled', 'refunded')
+      AND o.pay_time IS NOT NULL
+      AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+    GROUP BY p.cat_l1
+    ORDER BY p.cat_l1;
+
+explanation: |
+  1. 条件聚合：同一行用两个 CASE 把新品/老品金额分别求和。
+  2. 口径：实付落在 order_items，排除 cancelled/refunded。
+
+pitfalls:
+  - 用 is_new=1 / =0 与布尔比较混用（MySQL 里布尔即 0/1，但显式更稳）
+  - 忘记排除退款单
+  - 把 old_gmv 写成 ELSE NULL 导致 SUM 忽略（应 ELSE 0）
+
+capability_points: [agg.conditional, agg.multi_group]

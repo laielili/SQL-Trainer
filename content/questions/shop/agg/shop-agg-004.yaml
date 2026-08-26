@@ -1,0 +1,84 @@
+id: shop-agg-004
+dataset: shop
+scenario: agg
+chain: shop-agg-chain-a
+chain_step: 4
+title: 品类 GMV 小计与总计（WITH ROLLUP）
+
+business_prompt: |
+  “GMV 看板要加合计行：按一级品类统计 2025 年实付 GMV，并在最后加一行‘ALL’表示全部品类合计。
+   一行里要能区分这是小计/合计还是普通品类行。”
+
+context_notes:
+  - MySQL 没有 GROUPING SETS，用 WITH ROLLUP + GROUPING() 区分真 NULL 与汇总行
+  - GROUPING(cat_l1)=1 表示这一行是合计行
+  - 实付 = order_items.item_amount 之和；排除 cancelled/refunded
+
+tables: [orders, order_items, dim_product]
+
+expected_columns:
+  - {name: cat_label, type: string}
+  - {name: order_cnt, type: int}
+  - {name: gmv, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 用 GROUP BY ROLLUP(cat_l1) 产生小计/合计行。
+  - GROUPING(cat_l1)=1 的代表合计行，用 CASE 把它显示成 'ALL'。
+  - 排序时合计行放最后：ORDER BY GROUPING(cat_l1), cat_l1。
+
+reference_sql: |
+  SELECT CASE WHEN GROUPING(p.cat_l1) = 1 THEN 'ALL' ELSE p.cat_l1 END AS cat_label,
+         COUNT(DISTINCT o.order_id) AS order_cnt,
+         SUM(oi.item_amount) AS gmv
+  FROM order_items oi
+  JOIN orders o ON o.order_id = oi.order_id
+  JOIN dim_product p ON p.product_id = oi.product_id
+  WHERE o.status NOT IN ('cancelled', 'refunded')
+    AND o.pay_time IS NOT NULL
+    AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+  GROUP BY ROLLUP(p.cat_l1)
+  ORDER BY GROUPING(p.cat_l1), p.cat_l1;
+
+alt_solutions:
+  - |
+    SELECT cat_label, SUM(order_cnt) AS order_cnt, SUM(gmv) AS gmv
+    FROM (
+        SELECT p.cat_l1 AS cat_label,
+               COUNT(DISTINCT o.order_id) AS order_cnt,
+               SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        JOIN dim_product p ON p.product_id = oi.product_id
+        WHERE o.status NOT IN ('cancelled', 'refunded')
+          AND o.pay_time IS NOT NULL
+          AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+        GROUP BY p.cat_l1
+        UNION ALL
+        SELECT 'ALL',
+               COUNT(DISTINCT o.order_id),
+               SUM(oi.item_amount)
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        WHERE o.status NOT IN ('cancelled', 'refunded')
+          AND o.pay_time IS NOT NULL
+          AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+    ) t
+    GROUP BY cat_label
+    ORDER BY cat_label;
+
+explanation: |
+  1. ROLLUP：GROUP BY ROLLUP(cat_l1) 自动追加合计行。
+  2. 区分：GROUPING()=1 是汇总行，用 CASE 显示 'ALL'。
+  3. 老写法：用 UNION ALL 手工拼合计（alt 展示），但 ROLLUP 更简洁。
+
+pitfalls:
+  - 用字符串 'ALL' 当普通品类名导致和真品类混淆（要靠 GROUPING 区分）
+  - 忘记排除 cancelled/refunded，合计虚高
+  - 在 MySQL 里误用 GROUPING SETS（本训练器模拟 MySQL，不支持）
+
+capability_points: [agg.rollup, agg.grouping_sets]

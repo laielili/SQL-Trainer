@@ -1,0 +1,67 @@
+id: shop-pivot-003
+dataset: shop
+scenario: pivot
+chain: shop-pivot-chain-a
+chain_step: 3
+title: 年龄段 × 性别 用户数交叉表（含行合计）
+
+business_prompt: |
+  用研要一张交叉表：“行是年龄段，列是性别 M / F / U，格子里是用户数，
+   最后再加一列这一行的合计，按年龄段升序。”
+
+context_notes:
+  - 只统计 users 表全量用户
+  - 列名固定为 male_cnt / female_cnt / unknown_cnt / total_cnt
+  - 性别取值只有 M / F / U，不存在 NULL
+
+tables: [users]
+
+expected_columns:
+  - {name: age_band, type: string}
+  - {name: male_cnt, type: int}
+  - {name: female_cnt, type: int}
+  - {name: unknown_cnt, type: int}
+  - {name: total_cnt, type: int}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 交叉表 = GROUP BY 行维度 + 每个列维度取值一个条件聚合。
+  - 计数用 COUNT(CASE WHEN gender='M' THEN 1 END)，注意 COUNT 会忽略 NULL 所以不用写 ELSE。
+  - 行合计直接 COUNT(*)，不需要把三列加起来。
+
+reference_sql: |
+  SELECT age_band,
+         COUNT(CASE WHEN gender = 'M' THEN 1 END) AS male_cnt,
+         COUNT(CASE WHEN gender = 'F' THEN 1 END) AS female_cnt,
+         COUNT(CASE WHEN gender = 'U' THEN 1 END) AS unknown_cnt,
+         COUNT(*) AS total_cnt
+  FROM users
+  GROUP BY age_band
+  ORDER BY age_band;
+
+alt_solutions:
+  - |
+    SELECT age_band,
+           SUM(CASE WHEN gender = 'M' THEN 1 ELSE 0 END) AS male_cnt,
+           SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) AS female_cnt,
+           SUM(CASE WHEN gender = 'U' THEN 1 ELSE 0 END) AS unknown_cnt,
+           COUNT(user_id) AS total_cnt
+    FROM users
+    GROUP BY age_band
+    ORDER BY age_band;
+
+explanation: |
+  1. COUNT(CASE WHEN 条件 THEN 1 END) 与 SUM(CASE WHEN 条件 THEN 1 ELSE 0 END) 等价。
+  2. COUNT 忽略 NULL 是条件计数的关键机制：不满足条件时返回 NULL 即被跳过。
+  3. 行合计用 COUNT(*) 更稳：如果将来新增性别取值，三列相加会漏掉。
+
+pitfalls:
+  - 写 COUNT(CASE WHEN gender='M' THEN 1 ELSE 0 END)，ELSE 0 让 COUNT 把所有行都算上，三列都等于总数
+  - 用 total_cnt = male + female + unknown，未来新增枚举值会漏计
+  - 忘记 GROUP BY age_band，只得到一行全局汇总
+
+capability_points: [pivot.crosstab, pivot.conditional_count, agg.count_semantics]

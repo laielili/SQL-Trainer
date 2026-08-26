@@ -1,0 +1,17 @@
+# SQL-Trainer 直接依赖
+# 安装：.venv/Scripts/python.exe -m pip install -r requirements.txt
+
+# Web 服务
+fastapi==0.141.1
+uvicorn==0.52.1
+pydantic==2.13.4
+
+# SQL 执行引擎
+duckdb==1.5.5
+
+# 题库 / 数据集配置
+PyYAML==6.0.3
+
+# 数据集生成（content/datasets/*/generate.py）
+pandas==3.0.5
+numpy==2.5.1

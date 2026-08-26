@@ -1,0 +1,78 @@
+id: shop-pivot-001
+dataset: shop
+scenario: pivot
+chain: shop-pivot-chain-a
+chain_step: 1
+title: 各品类季度实付 GMV 透视（长转宽）
+
+business_prompt: |
+  财务要一张透视表：“把 2025 年各一级品类的实付 GMV，按季度拆成 Q1~Q4 四列，
+   每行一个品类，按品类名升序。我要直接贴进 Excel。”
+
+context_notes:
+  - 实付 = order_items.item_amount 之和；排除 cancelled/refunded
+  - MySQL 没有 PIVOT，用条件聚合 SUM(CASE WHEN ... THEN item_amount ELSE 0 END) 手写列
+  - 季度来自 dim_date.q（通过订单日期关联 dim_date；用 CAST(order_time AS DATE) 关联 date_key）
+
+tables: [orders, order_items, dim_product, dim_date]
+
+expected_columns:
+  - {name: cat_l1, type: string}
+  - {name: q1_gmv, type: decimal, tolerance: 0.01}
+  - {name: q2_gmv, type: decimal, tolerance: 0.01}
+  - {name: q3_gmv, type: decimal, tolerance: 0.01}
+  - {name: q4_gmv, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 一行一个品类，SELECT 里写 4 个 SUM(CASE WHEN q=1 THEN item_amount ELSE 0 END) 这样的列。
+  - 季度来自 dim_date 表：把 order_time 转成日期后 JOIN dim_date.date_key 取 q。
+  - ELSE 0 不能省，否则 NULL 参与 SUM 没问题但语义不清晰；SUM 会自动忽略 NULL。
+
+reference_sql: |
+  SELECT p.cat_l1,
+         SUM(CASE WHEN d.q = 1 THEN oi.item_amount ELSE 0 END) AS q1_gmv,
+         SUM(CASE WHEN d.q = 2 THEN oi.item_amount ELSE 0 END) AS q2_gmv,
+         SUM(CASE WHEN d.q = 3 THEN oi.item_amount ELSE 0 END) AS q3_gmv,
+         SUM(CASE WHEN d.q = 4 THEN oi.item_amount ELSE 0 END) AS q4_gmv
+  FROM order_items oi
+  JOIN orders o ON o.order_id = oi.order_id
+  JOIN dim_product p ON p.product_id = oi.product_id
+  JOIN dim_date d ON d.date_key = CAST(o.order_time AS DATE)
+  WHERE o.order_time >= '2025-01-01'
+    AND o.order_time <  '2026-01-01'
+    AND o.status NOT IN ('cancelled', 'refunded')
+  GROUP BY p.cat_l1
+  ORDER BY p.cat_l1;
+
+alt_solutions:
+  - |
+    SELECT p.cat_l1,
+           SUM(CASE WHEN d.q = 1 THEN oi.item_amount ELSE 0 END) AS q1_gmv,
+           SUM(CASE WHEN d.q = 2 THEN oi.item_amount ELSE 0 END) AS q2_gmv,
+           SUM(CASE WHEN d.q = 3 THEN oi.item_amount ELSE 0 END) AS q3_gmv,
+           SUM(CASE WHEN d.q = 4 THEN oi.item_amount ELSE 0 END) AS q4_gmv
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.order_id
+    JOIN dim_product p ON p.product_id = oi.product_id
+    JOIN dim_date d ON d.date_key = CAST(o.order_time AS DATE)
+    WHERE o.status NOT IN ('cancelled', 'refunded')
+      AND o.order_time >= '2025-01-01' AND o.order_time < '2026-01-01'
+    GROUP BY p.cat_l1
+    ORDER BY p.cat_l1;
+
+explanation: |
+  1. 长转宽：用 4 个条件聚合列把“季度”这个维度从行折叠成列。
+  2. 季度来源：订单时间 JOIN dim_date 取 q 字段（MySQL 无 generate_series，靠物理日期维表）。
+  3. 口径：实付落到 order_items 求和，并排除 cancelled/refunded。
+
+pitfalls:
+  - 用 PIVOT/UNPIVOT（PG/DuckDB 语法），本训练器模拟 MySQL，写了会被拦截
+  - 用 MONTH(order_time) 自己算季度，绕过了 dim_date，失去“日期维表补全”的训练点
+  - 忘记排除 cancelled/refunded，四列金额虚高
+
+capability_points: [pivot.long2wide, pivot.multi_metric, growth.date_spine]

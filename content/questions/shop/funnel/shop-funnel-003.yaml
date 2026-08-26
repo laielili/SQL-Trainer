@@ -1,0 +1,105 @@
+id: shop-funnel-003
+dataset: shop
+scenario: funnel
+chain: shop-funnel-chain-a
+chain_step: 3
+title: 漏斗单步转化率与整体转化率
+
+business_prompt: |
+  在无序漏斗人数的基础上，再给两列：“相邻步骤的转化率（本步 ÷ 上一步），
+   以及整体转化率（本步 ÷ 第一步）。第一步的单步转化率留空。”
+
+context_notes:
+  - 步骤顺序固定为 1 view_product → 2 add_cart → 3 submit_order → 4 pay_success
+  - 人数口径同 funnel-001：2025 年内该事件的去重用户数
+  - 第 1 步的 step_conv_rate 为 NULL；整体转化率第 1 步为 1.0
+
+tables: [events]
+
+expected_columns:
+  - {name: step_no, type: int}
+  - {name: step_name, type: string}
+  - {name: user_cnt, type: int}
+  - {name: step_conv_rate, type: decimal, tolerance: 0.0001}
+  - {name: total_conv_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\bover\\s*\\("
+      message: 相邻步骤/首行取值请用窗口函数实现
+
+hints:
+  - 先构造一张 (step_no, step_name, user_cnt) 的四行小表。
+  - 单步转化率用 LAG(user_cnt) OVER (ORDER BY step_no) 拿上一步。
+  - 整体转化率用 FIRST_VALUE(user_cnt) OVER (ORDER BY step_no) 拿第一步。
+
+reference_sql: |
+  WITH base AS (
+      SELECT CASE event_name
+                 WHEN 'view_product' THEN 1
+                 WHEN 'add_cart'     THEN 2
+                 WHEN 'submit_order' THEN 3
+                 ELSE 4
+             END AS step_no,
+             event_name AS step_name,
+             COUNT(DISTINCT user_id) AS user_cnt
+      FROM events
+      WHERE event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        AND event_name IN ('view_product', 'add_cart', 'submit_order', 'pay_success')
+      GROUP BY 1, 2
+  )
+  SELECT step_no,
+         step_name,
+         user_cnt,
+         ROUND(user_cnt * 1.0
+             / NULLIF(LAG(user_cnt) OVER (ORDER BY step_no), 0), 4) AS step_conv_rate,
+         ROUND(user_cnt * 1.0
+             / NULLIF(FIRST_VALUE(user_cnt) OVER (ORDER BY step_no), 0), 4) AS total_conv_rate
+  FROM base
+  ORDER BY step_no;
+
+alt_solutions:
+  - |
+    WITH base AS (
+        SELECT 1 AS step_no, 'view_product' AS step_name, COUNT(DISTINCT user_id) AS user_cnt
+        FROM events WHERE event_name = 'view_product'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        UNION ALL
+        SELECT 2, 'add_cart', COUNT(DISTINCT user_id)
+        FROM events WHERE event_name = 'add_cart'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        UNION ALL
+        SELECT 3, 'submit_order', COUNT(DISTINCT user_id)
+        FROM events WHERE event_name = 'submit_order'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        UNION ALL
+        SELECT 4, 'pay_success', COUNT(DISTINCT user_id)
+        FROM events WHERE event_name = 'pay_success'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+    ),
+    w AS (
+        SELECT step_no, step_name, user_cnt,
+               LAG(user_cnt) OVER (ORDER BY step_no) AS prev_cnt,
+               MAX(CASE WHEN step_no = 1 THEN user_cnt END) OVER () AS first_cnt
+        FROM base
+    )
+    SELECT step_no, step_name, user_cnt,
+           ROUND(user_cnt * 1.0 / NULLIF(prev_cnt, 0), 4) AS step_conv_rate,
+           ROUND(user_cnt * 1.0 / NULLIF(first_cnt, 0), 4) AS total_conv_rate
+    FROM w
+    ORDER BY step_no;
+
+explanation: |
+  1. 漏斗的两种转化率：单步（环比式）看瓶颈在哪一环，整体（累计式）看最终效率。
+  2. LAG 取上一行、FIRST_VALUE 取首行，是窗口函数在小结果集上的典型用法。
+  3. CASE 把事件名映射成 step_no，是让漏斗“有序”的最简单方式。
+
+pitfalls:
+  - 用 event_name 字母序排序，漏斗顺序变成 add_cart 在最前
+  - FIRST_VALUE 忘记 ORDER BY，取到的“首行”不确定
+  - 直接除法不加 NULLIF，上一步为 0 时报除零错
+
+capability_points: [funnel.conv_rate, funnel.step_vs_total, window.lag, window.first_value]

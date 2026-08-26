@@ -1,0 +1,248 @@
+dataset: saas
+tables:
+- name: dim_date
+  comment: 日期维表（连续 2024-01-01 ~ 2025-12-31，含闰年）
+  columns:
+  - name: date_key
+    type: DATE
+    comment: ''
+    pk: true
+  - name: y
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: q
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: m
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: w
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: dow
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: is_weekend
+    type: BOOLEAN
+    comment: ''
+    pk: false
+  - name: is_holiday
+    type: BOOLEAN
+    comment: ''
+    pk: false
+  - name: last_year_same_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: prev_month_date
+    type: DATE
+    comment: ''
+    pk: false
+- name: accounts
+  comment: 企业账号
+  columns:
+  - name: account_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: signup_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: industry
+    type: VARCHAR
+    comment: SaaS/Ecommerce/Finance/Education/Healthcare/Manufacturing/Media
+    pk: false
+    enum:
+    - SaaS
+    - Ecommerce
+    - Finance
+    - Education
+    - Healthcare
+    - Manufacturing
+    - Media
+  - name: company_size
+    type: VARCHAR
+    comment: 1-10 / 11-50 / 51-200 / 201-1000 / 1000+
+    pk: false
+    enum:
+    - 1-10
+    - 11-50
+    - 51-200
+    - 201-1000
+    - 1000+
+  - name: source_channel
+    type: VARCHAR
+    comment: ads / referral / organic / event
+    pk: false
+    enum:
+    - ads
+    - referral
+    - organic
+    - event
+- name: users
+  comment: 用户表
+  columns:
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: account_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: join_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: role
+    type: VARCHAR
+    comment: owner / admin / member
+    pk: false
+    enum:
+    - owner
+    - admin
+    - member
+- name: subscriptions
+  comment: 订阅表
+  columns:
+  - name: sub_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: account_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: plan
+    type: VARCHAR
+    comment: free / starter / pro / enterprise
+    pk: false
+    enum:
+    - free
+    - starter
+    - pro
+    - enterprise
+  - name: seats
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: start_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: end_date
+    type: DATE
+    comment: NULL = 仍生效；churned 时有值
+    pk: false
+  - name: mrr
+    type: DOUBLE
+    comment: 月度经常性收入
+    pk: false
+  - name: status
+    type: VARCHAR
+    comment: trialing/active/past_due/churned/upgraded/downgraded
+    pk: false
+    enum:
+    - trialing
+    - active
+    - past_due
+    - churned
+    - upgraded
+    - downgraded
+  - name: is_trial
+    type: BOOLEAN
+    comment: ''
+    pk: false
+- name: invoices
+  comment: 账单表
+  columns:
+  - name: invoice_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: account_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: bill_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: amount
+    type: DOUBLE
+    comment: ''
+    pk: false
+  - name: paid
+    type: BOOLEAN
+    comment: ''
+    pk: false
+    enum:
+    - '0'
+    - '1'
+  - name: pay_date
+    type: DATE
+    comment: 未支付为 NULL
+    pk: false
+- name: feature_usage
+  comment: 功能使用日志
+  columns:
+  - name: log_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: account_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: use_time
+    type: TIMESTAMP
+    comment: ''
+    pk: false
+  - name: feature_code
+    type: VARCHAR
+    comment: dashboard/report/export/api/invite/billing/search
+    pk: false
+    enum:
+    - dashboard
+    - report
+    - export
+    - api
+    - invite
+    - billing
+    - search
+- name: trial_conversion
+  comment: 试用转化
+  columns:
+  - name: account_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: trial_start
+    type: DATE
+    comment: ''
+    pk: false
+  - name: trial_end
+    type: DATE
+    comment: ''
+    pk: false
+  - name: converted
+    type: BOOLEAN
+    comment: ''
+    pk: false
+    enum:
+    - '0'
+    - '1'
+  - name: convert_date
+    type: DATE
+    comment: 未转化则为 NULL
+    pk: false

@@ -1,0 +1,93 @@
+id: shop-growth-001
+dataset: shop
+scenario: growth
+chain: shop-growth-chain-a
+chain_step: 1
+title: 月度 GMV 环比增长率
+
+business_prompt: |
+  老板要看趋势：“拉一下每个自然月的实付 GMV，再算环比（跟上个月比）的增长率，
+   从 2024 年 1 月开始，按月份升序。”
+
+context_notes:
+  - GMV = 已完成/已支付订单的 order_items.item_amount 之和（排除 cancelled/refunded）
+  - 环比 = (本月 - 上月) / 上月；上月为 NULL 或 0 时增长率应为 NULL（不能报除零错）
+  - 月份用 DATE_FORMAT(order_time, '%Y-%m') 取整；数据含 2024-2025 两个完整年
+
+tables: [orders, order_items]
+
+expected_columns:
+  - {name: ym, type: string}
+  - {name: gmv, type: decimal, tolerance: 0.01}
+  - {name: prev_gmv, type: decimal, tolerance: 0.01}
+  - {name: mom_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 先按月聚合出 GMV（子查询/CTE），再用 LAG 取上一行的 GMV。
+  - LAG 默认取“排序后的上一行”，所以必须 ORDER BY ym 后再 LAG。
+  - 增长率用 (gmv - prev)/NULLIF(prev,0)，上月为空或 0 时返回 NULL。
+
+reference_sql: |
+  WITH monthly AS (
+      SELECT DATE_FORMAT(o.order_time, '%Y-%m') AS ym,
+             SUM(oi.item_amount) AS gmv
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status NOT IN ('cancelled', 'refunded')
+        AND o.pay_time IS NOT NULL
+      GROUP BY 1
+  )
+  SELECT ym,
+         gmv,
+         LAG(gmv) OVER (ORDER BY ym) AS prev_gmv,
+         ROUND(
+             (gmv - LAG(gmv) OVER (ORDER BY ym))
+             / NULLIF(LAG(gmv) OVER (ORDER BY ym), 0),
+         4) AS mom_rate
+  FROM monthly
+  ORDER BY ym;
+
+alt_solutions:
+  - |
+    SELECT m1.ym,
+           m1.gmv,
+           m2.gmv AS prev_gmv,
+           ROUND((m1.gmv - m2.gmv) / NULLIF(m2.gmv, 0), 4) AS mom_rate
+    FROM (
+        SELECT DATE_FORMAT(o.order_time, '%Y-%m') AS ym,
+               SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        WHERE o.status NOT IN ('cancelled', 'refunded')
+          AND o.pay_time IS NOT NULL
+        GROUP BY 1
+    ) m1
+    LEFT JOIN (
+        SELECT DATE_FORMAT(o.order_time, '%Y-%m') AS ym,
+               SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        WHERE o.status NOT IN ('cancelled', 'refunded')
+          AND o.pay_time IS NOT NULL
+        GROUP BY 1
+    ) m2 ON m2.ym = DATE_FORMAT(
+           DATE_SUB(CAST(CONCAT(m1.ym, '-01') AS DATE), INTERVAL 1 MONTH),
+           '%Y-%m')
+    ORDER BY m1.ym;
+
+explanation: |
+  1. 聚合：按月（'%Y-%m'）聚合 GMV 到一张月表。
+  2. 取上期：LAG 按 ym 升序取上一行；首月 prev_gmv 为 NULL。
+  3. 安全除法：NULLIF(prev,0) 让基期为 0 或缺失时增长率返回 NULL，而非报错。
+
+pitfalls:
+  - 直接用 (gmv - LAG)/LAG 不做 NULLIF，上月为 0 时除零报错
+  - 忘记排除 cancelled/refunded，GMV 与口径不符
+  - 用自连接对上月时把月份字符串当日期加减，需先 STR_TO_DATE 再 INTERVAL
+
+capability_points: [growth.mom, growth.date_spine, growth.safe_div, growth.boundary]

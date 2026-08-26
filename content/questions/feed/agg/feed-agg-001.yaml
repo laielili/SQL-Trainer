@@ -1,0 +1,80 @@
+id: feed-agg-001
+dataset: feed
+scenario: agg
+chain: feed-agg-chain-a
+chain_step: 1
+title: 分类 × 内容类型的播放规模与平均停留
+
+business_prompt: |
+  内容运营要看盘子：“2025 年，按话题分类和内容类型两个维度，
+   统计播放次数、播放人数和平均停留秒数，按分类、类型排。”
+
+context_notes:
+  - 播放事件 = events.event_name = 'play'，其 stay_sec 有值
+  - content_id 需经 contents 关联到 topics 拿 category
+  - 平均停留保留 2 位小数；播放人数是去重用户数
+
+tables: [events, contents, topics]
+
+expected_columns:
+  - {name: category, type: string}
+  - {name: content_type, type: string}
+  - {name: play_cnt, type: int}
+  - {name: play_users, type: int}
+  - {name: avg_stay_sec, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 两个维度就是 GROUP BY 两列，先把 events → contents → topics 三张表串起来。
+  - 播放次数 COUNT(*) 与播放人数 COUNT(DISTINCT user_id) 是两个不同口径。
+  - AVG 会自动忽略 NULL，但本题 play 事件的 stay_sec 都有值。
+
+reference_sql: |
+  SELECT t.category,
+         c.content_type,
+         COUNT(*) AS play_cnt,
+         COUNT(DISTINCT e.user_id) AS play_users,
+         ROUND(AVG(e.stay_sec), 2) AS avg_stay_sec
+  FROM events e
+  JOIN contents c ON c.content_id = e.content_id
+  JOIN topics   t ON t.topic_id  = c.topic_id
+  WHERE e.event_name = 'play'
+    AND e.event_time >= '2025-01-01'
+    AND e.event_time <  '2026-01-01'
+  GROUP BY t.category, c.content_type
+  ORDER BY t.category, c.content_type;
+
+alt_solutions:
+  - |
+    WITH play AS (
+        SELECT e.user_id, e.stay_sec, c.content_type, c.topic_id
+        FROM events e
+        JOIN contents c ON c.content_id = e.content_id
+        WHERE e.event_name = 'play'
+          AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+    )
+    SELECT t.category,
+           p.content_type,
+           COUNT(*) AS play_cnt,
+           COUNT(DISTINCT p.user_id) AS play_users,
+           ROUND(SUM(p.stay_sec) * 1.0 / COUNT(*), 2) AS avg_stay_sec
+    FROM play p
+    JOIN topics t ON t.topic_id = p.topic_id
+    GROUP BY 1, 2
+    ORDER BY 1, 2;
+
+explanation: |
+  1. 多维聚合的第一步是把维度补齐：事实表 events 只有 content_id，维度要靠 JOIN 补。
+  2. 次数 vs 人数是分析里最容易混的一对口径，题目问“次”就 COUNT(*)，问“人”就去重。
+  3. AVG(x) 等价于 SUM(x)/COUNT(x)，注意 COUNT(x) 会跳过 NULL 而 COUNT(*) 不会。
+
+pitfalls:
+  - 用 COUNT(DISTINCT content_id) 冒充播放次数
+  - 忘记过滤 event_name='play'，把 impression/click 也算进来
+  - 用 SUM(stay_sec)/COUNT(*) 但 stay_sec 有 NULL 时，与 AVG 结果不一致
+
+capability_points: [agg.multi_dim, agg.count_semantics, agg.join_dimension]

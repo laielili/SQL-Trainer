@@ -1,0 +1,86 @@
+id: feed-pivot-001
+dataset: feed
+scenario: pivot
+chain: feed-pivot-chain-a
+chain_step: 1
+title: 分类 × 内容类型 播放量交叉表
+
+business_prompt: |
+  内容大盘要一张透视：“2025 年，行是话题分类，列是四种内容类型的播放次数，
+   最后加一列该分类的总播放次数，按分类名升序。”
+
+context_notes:
+  - 播放 = event_name='play'
+  - 四种内容类型固定：short_video / article / live / image
+  - 列名：short_video_plays / article_plays / live_plays / image_plays / total_plays
+
+tables: [events, contents, topics]
+
+expected_columns:
+  - {name: category, type: string}
+  - {name: short_video_plays, type: int}
+  - {name: article_plays, type: int}
+  - {name: live_plays, type: int}
+  - {name: image_plays, type: int}
+  - {name: total_plays, type: int}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_not_match:
+    - pattern: "(?is)\\bpivot\\b"
+      message: PIVOT 是 DuckDB/SQLServer 语法，MySQL 环境请用条件聚合手写列
+
+hints:
+  - 每一个“列”对应一个 SUM(CASE WHEN content_type='xxx' THEN 1 ELSE 0 END)。
+  - 总数直接 COUNT(*)，不要把四列加起来（将来多一种类型就漏了）。
+  - 记得先 JOIN 出 category 和 content_type 两个维度再分组。
+
+reference_sql: |
+  SELECT t.category,
+         SUM(CASE WHEN c.content_type = 'short_video' THEN 1 ELSE 0 END) AS short_video_plays,
+         SUM(CASE WHEN c.content_type = 'article'     THEN 1 ELSE 0 END) AS article_plays,
+         SUM(CASE WHEN c.content_type = 'live'        THEN 1 ELSE 0 END) AS live_plays,
+         SUM(CASE WHEN c.content_type = 'image'       THEN 1 ELSE 0 END) AS image_plays,
+         COUNT(*) AS total_plays
+  FROM events e
+  JOIN contents c ON c.content_id = e.content_id
+  JOIN topics   t ON t.topic_id  = c.topic_id
+  WHERE e.event_name = 'play'
+    AND e.event_time >= '2025-01-01'
+    AND e.event_time <  '2026-01-01'
+  GROUP BY t.category
+  ORDER BY t.category;
+
+alt_solutions:
+  - |
+    WITH play AS (
+        SELECT t.category, c.content_type
+        FROM events e
+        JOIN contents c ON c.content_id = e.content_id
+        JOIN topics   t ON t.topic_id  = c.topic_id
+        WHERE e.event_name = 'play'
+          AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+    )
+    SELECT category,
+           COUNT(CASE WHEN content_type = 'short_video' THEN 1 END) AS short_video_plays,
+           COUNT(CASE WHEN content_type = 'article'     THEN 1 END) AS article_plays,
+           COUNT(CASE WHEN content_type = 'live'        THEN 1 END) AS live_plays,
+           COUNT(CASE WHEN content_type = 'image'       THEN 1 END) AS image_plays,
+           COUNT(*) AS total_plays
+    FROM play
+    GROUP BY category
+    ORDER BY category;
+
+explanation: |
+  1. 长转宽的通用配方：GROUP BY 行维度，列维度的每个取值写一个条件聚合。
+  2. MySQL 没有 PIVOT，条件聚合就是唯一正解，好处是列名完全可控。
+  3. 合计列用 COUNT(*) 而非四列相加，对枚举扩展更健壮。
+
+pitfalls:
+  - 直接写 PIVOT，在 MySQL 环境会被拦截
+  - 列维度取值写错大小写或拼写，对应列恒为 0 而不报错
+  - GROUP BY 里多带了 content_type，结果又退回长表
+
+capability_points: [pivot.long2wide, pivot.conditional_count, pivot.total_column]

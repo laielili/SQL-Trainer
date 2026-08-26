@@ -1,0 +1,97 @@
+id: shop-funnel-002
+dataset: shop
+scenario: funnel
+chain: shop-funnel-chain-a
+chain_step: 2
+title: 会话内有序漏斗（时间必须严格递增）
+
+business_prompt: |
+  产品经理说无序漏斗不准：“同一个会话（session_id）里，必须先浏览商品、再加购、
+   再提交订单、最后支付成功，时间严格往后走才算走通这一步。给我 2025 年四步的会话数。”
+
+context_notes:
+  - 每步时间取该会话内该事件的最早时间 MIN(event_time)
+  - 严格递增：t2 > t1、t3 > t2、t4 > t3，等于不算通过
+  - 输出 step_no 1~4 与 step_name，step_name 用 view_product / add_cart / submit_order / pay_success
+  - 统计对象是会话数（COUNT 会话），不是用户数
+
+tables: [events]
+
+expected_columns:
+  - {name: step_no, type: int}
+  - {name: step_name, type: string}
+  - {name: session_cnt, type: int}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)union\\s+all"
+      message: 四步逐层收窄，请用 UNION ALL 拼成四行
+
+hints:
+  - 先把事件表“压平”成一行一个 session、四列时间戳（条件 MIN）。
+  - 压平之后，每一步就是在前一步条件上再加一个时间比较。
+  - 第 4 步的条件包含前三步的全部条件，是层层嵌套的关系。
+
+reference_sql: |
+  WITH sess AS (
+      SELECT session_id,
+             MIN(CASE WHEN event_name = 'view_product' THEN event_time END) AS t1,
+             MIN(CASE WHEN event_name = 'add_cart'     THEN event_time END) AS t2,
+             MIN(CASE WHEN event_name = 'submit_order' THEN event_time END) AS t3,
+             MIN(CASE WHEN event_name = 'pay_success'  THEN event_time END) AS t4
+      FROM events
+      WHERE event_time >= '2025-01-01' AND event_time < '2026-01-01'
+      GROUP BY session_id
+  )
+  SELECT 1 AS step_no, 'view_product' AS step_name, COUNT(*) AS session_cnt
+  FROM sess WHERE t1 IS NOT NULL
+  UNION ALL
+  SELECT 2, 'add_cart', COUNT(*)
+  FROM sess WHERE t1 IS NOT NULL AND t2 > t1
+  UNION ALL
+  SELECT 3, 'submit_order', COUNT(*)
+  FROM sess WHERE t1 IS NOT NULL AND t2 > t1 AND t3 > t2
+  UNION ALL
+  SELECT 4, 'pay_success', COUNT(*)
+  FROM sess WHERE t1 IS NOT NULL AND t2 > t1 AND t3 > t2 AND t4 > t3
+  ORDER BY step_no;
+
+alt_solutions:
+  - |
+    WITH sess AS (
+        SELECT session_id,
+               MIN(CASE WHEN event_name = 'view_product' THEN event_time END) AS t1,
+               MIN(CASE WHEN event_name = 'add_cart'     THEN event_time END) AS t2,
+               MIN(CASE WHEN event_name = 'submit_order' THEN event_time END) AS t3,
+               MIN(CASE WHEN event_name = 'pay_success'  THEN event_time END) AS t4
+        FROM events
+        WHERE event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        GROUP BY session_id
+    ),
+    flag AS (
+        SELECT CASE WHEN t1 IS NOT NULL THEN 1 ELSE 0 END AS s1,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 THEN 1 ELSE 0 END AS s2,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 AND t3 > t2 THEN 1 ELSE 0 END AS s3,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 AND t3 > t2 AND t4 > t3 THEN 1 ELSE 0 END AS s4
+        FROM sess
+    )
+    SELECT 1 AS step_no, 'view_product' AS step_name, SUM(s1) AS session_cnt FROM flag
+    UNION ALL SELECT 2, 'add_cart',     SUM(s2) FROM flag
+    UNION ALL SELECT 3, 'submit_order', SUM(s3) FROM flag
+    UNION ALL SELECT 4, 'pay_success',  SUM(s4) FROM flag
+    ORDER BY step_no;
+
+explanation: |
+  1. 有序漏斗的标准套路：先按主体（session/user）把事件压平成多列时间戳。
+  2. 压平之后“顺序约束”就退化成时间戳之间的大小比较，非常直观。
+  3. 每一步必须继承前面所有步的条件，否则会出现“下一步人数比上一步多”的怪象。
+
+pitfalls:
+  - 第 3 步只写 t3 > t2 而不带 t2 > t1，导致漏斗出现回升
+  - 用 > = 而不是 >，同一时间戳的两个事件被判定为“有先后”
+  - 用 MAX 而不是 MIN 取步骤时间，语义变成“最后一次”，顺序判断失真
+
+capability_points: [funnel.ordered, funnel.flatten, funnel.monotonic]

@@ -1,0 +1,92 @@
+id: feed-window-001
+dataset: feed
+scenario: window
+chain: feed-window-chain-a
+chain_step: 1
+title: 每个分类播放量 Top3 内容（并列全保留）
+
+business_prompt: |
+  编辑部要做榜单：“2025 年每个话题分类里，播放次数最多的前 3 名内容。
+   如果有并列第 3 名，都要保留，不要随便砍掉。”
+
+context_notes:
+  - 播放次数 = event_name='play' 的事件条数
+  - “并列都保留”意味着用 DENSE_RANK 而不是 ROW_NUMBER
+  - 输出 rk 排名列，按分类、排名、content_id 排序
+
+tables: [events, contents, topics]
+
+expected_columns:
+  - {name: category, type: string}
+  - {name: content_id, type: int}
+  - {name: play_cnt, type: int}
+  - {name: rk, type: int}
+
+order_sensitive: false
+row_limit: 500
+
+constraints:
+  must_match:
+    - pattern: "(?is)dense_rank\\s*\\(\\s*\\)"
+      message: 并列名次都要保留，请用 DENSE_RANK
+  must_not_match:
+    - pattern: "(?is)\\blimit\\s+3\\b"
+      message: LIMIT 3 只能砍全局前 3，无法做到“每个分类各取 3”
+
+hints:
+  - 先聚合出「分类-内容-播放次数」，再在这张表上开窗排名。
+  - PARTITION BY category 表示“每个分类内部各排各的”。
+  - 窗口函数不能写在 WHERE 里，必须先在子查询/CTE 里算出 rk 再过滤。
+
+reference_sql: |
+  WITH plays AS (
+      SELECT t.category,
+             c.content_id,
+             COUNT(*) AS play_cnt
+      FROM events e
+      JOIN contents c ON c.content_id = e.content_id
+      JOIN topics   t ON t.topic_id  = c.topic_id
+      WHERE e.event_name = 'play'
+        AND e.event_time >= '2025-01-01'
+        AND e.event_time <  '2026-01-01'
+      GROUP BY 1, 2
+  ),
+  ranked AS (
+      SELECT category, content_id, play_cnt,
+             DENSE_RANK() OVER (PARTITION BY category ORDER BY play_cnt DESC) AS rk
+      FROM plays
+  )
+  SELECT category, content_id, play_cnt, rk
+  FROM ranked
+  WHERE rk <= 3
+  ORDER BY category, rk, content_id;
+
+alt_solutions:
+  - |
+    SELECT category, content_id, play_cnt, rk
+    FROM (
+        SELECT t.category,
+               c.content_id,
+               COUNT(*) AS play_cnt,
+               DENSE_RANK() OVER (PARTITION BY t.category ORDER BY COUNT(*) DESC) AS rk
+        FROM events e
+        JOIN contents c ON c.content_id = e.content_id
+        JOIN topics   t ON t.topic_id  = c.topic_id
+        WHERE e.event_name = 'play'
+          AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+        GROUP BY t.category, c.content_id
+    ) r
+    WHERE rk <= 3
+    ORDER BY category, rk, content_id;
+
+explanation: |
+  1. 组内 TopN 的固定套路：聚合 → 开窗排名 → 外层过滤名次。
+  2. RANK / DENSE_RANK / ROW_NUMBER 的差别就在并列怎么处理，题目说“都保留”就选 DENSE_RANK。
+  3. 窗口函数可以直接写在聚合查询的 SELECT 里（alt 写法），此时它作用于聚合后的结果。
+
+pitfalls:
+  - 用 ROW_NUMBER，并列第 3 被随机砍掉一个
+  - 用 LIMIT 3，只拿到全局前 3 而不是每个分类前 3
+  - 把 rk <= 3 写进同层 WHERE，MySQL 报“窗口函数不允许出现在 WHERE”
+
+capability_points: [window.dense_rank, window.partition, window.topn, window.filter_after_rank]

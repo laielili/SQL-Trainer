@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQL 业务场景训练器</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SQL <span>Trainer</span></div>
+    <div class="dataset-pick">
+      <label>数据集</label>
+      <select id="datasetSelect"></select>
+    </div>
+    <div class="overall" id="overall">完成度 —</div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="practice">练习</button>
+      <button class="tab" data-tab="wrong">错题本 <span id="wrongBadge" class="badge">0</span></button>
+      <button class="tab" data-tab="srs">今日重练 <span id="srsBadge" class="badge">0</span></button>
+    </nav>
+  </header>
+
+  <!-- 练习视图 -->
+  <main id="view-practice" class="view">
+    <aside class="scenarios" id="scenarioNav"></aside>
+
+    <section class="workspace">
+      <div class="question-head">
+        <div class="chain-meta" id="chainMeta"></div>
+        <h2 id="qTitle">请选择左侧题目</h2>
+        <div class="prompt-box" id="businessPrompt"></div>
+        <div class="context-notes" id="contextNotes"></div>
+        <div class="expected" id="expectedCols"></div>
+      </div>
+
+      <div class="editor-row">
+        <div class="editor-pane">
+          <div class="editor-toolbar">
+            <button id="btnRun" class="btn">运行 <kbd>Ctrl+Enter</kbd></button>
+            <button id="btnSubmit" class="btn primary">提交判题</button>
+            <button id="btnHint" class="btn ghost">提示 <span id="hintCounter">0/3</span></button>
+            <button id="btnReveal" class="btn ghost">查看参考解</button>
+            <span class="spacer"></span>
+            <button id="btnFormat" class="btn ghost">格式化</button>
+          </div>
+          <div class="editor-wrap">
+            <pre id="highlight" aria-hidden="true"></pre>
+            <textarea id="sqlEditor" spellcheck="false" placeholder="在此编写 MySQL 查询…"></textarea>
+          </div>
+        </div>
+
+        <aside class="schema-pane">
+          <div class="schema-head">Schema <span class="muted">(点击插入)</span></div>
+          <div id="schemaTree" class="schema-tree"></div>
+        </aside>
+      </div>
+
+      <div class="hint-area" id="hintArea" hidden></div>
+
+      <div class="result-pane">
+        <div class="result-head">
+          <span class="result-title">结果与反馈</span>
+          <span id="verdictBadge" class="verdict hidden"></span>
+        </div>
+        <div class="feedback" id="feedback"></div>
+        <div class="result-table-wrap" id="resultTableWrap"></div>
+      </div>
+
+      <div class="reference-pane" id="referencePane" hidden></div>
+    </section>
+  </main>
+
+  <!-- 错题本 / 重练视图 -->
+  <main id="view-wrong" class="view hidden">
+    <section class="list-view">
+      <h2>错题本（按能力点聚类）</h2>
+      <div id="wrongList" class="cap-groups"></div>
+    </section>
+  </main>
+  <main id="view-srs" class="view hidden">
+    <section class="list-view">
+      <h2>今日重练（间隔重练 SRS）</h2>
+      <div id="srsList" class="cap-groups"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

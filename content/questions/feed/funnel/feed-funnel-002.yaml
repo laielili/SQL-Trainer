@@ -1,0 +1,94 @@
+id: feed-funnel-002
+dataset: feed
+scenario: funnel
+chain: feed-funnel-chain-a
+chain_step: 2
+title: 同一内容上的有序转化（点击→播放→完播）
+
+business_prompt: |
+  算法同学要严谨口径：“同一个用户对同一条内容，必须先点击、再播放、最后完播，
+   时间严格递增才算走通。统计 2025 年三步各有多少『用户-内容』对。”
+
+context_notes:
+  - 主体是「user_id + content_id」这一对，而不是会话
+  - 每步时间取该主体上该事件的最早时间 MIN(event_time)
+  - 严格递增：t_play > t_click，t_finish > t_play
+  - 只考虑 content_id 非空的事件（impression / follow 无 content_id）
+
+tables: [events]
+
+expected_columns:
+  - {name: step_no, type: int}
+  - {name: step_name, type: string}
+  - {name: pair_cnt, type: int}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)union\\s+all"
+      message: 三步逐层收窄，请用 UNION ALL 拼成三行
+
+hints:
+  - 先把事件压平：GROUP BY user_id, content_id，三个条件 MIN(event_time) 拿到三个时间戳。
+  - 压平后顺序判断就是时间戳比大小。
+  - 每一步的条件必须包含前面所有步，漏斗才会单调递减。
+
+reference_sql: |
+  WITH pair AS (
+      SELECT user_id,
+             content_id,
+             MIN(CASE WHEN event_name = 'click'  THEN event_time END) AS t1,
+             MIN(CASE WHEN event_name = 'play'   THEN event_time END) AS t2,
+             MIN(CASE WHEN event_name = 'finish' THEN event_time END) AS t3
+      FROM events
+      WHERE content_id IS NOT NULL
+        AND event_time >= '2025-01-01'
+        AND event_time <  '2026-01-01'
+      GROUP BY user_id, content_id
+  )
+  SELECT 1 AS step_no, 'click' AS step_name, COUNT(*) AS pair_cnt
+  FROM pair WHERE t1 IS NOT NULL
+  UNION ALL
+  SELECT 2, 'play', COUNT(*)
+  FROM pair WHERE t1 IS NOT NULL AND t2 > t1
+  UNION ALL
+  SELECT 3, 'finish', COUNT(*)
+  FROM pair WHERE t1 IS NOT NULL AND t2 > t1 AND t3 > t2
+  ORDER BY step_no;
+
+alt_solutions:
+  - |
+    WITH pair AS (
+        SELECT user_id, content_id,
+               MIN(CASE WHEN event_name = 'click'  THEN event_time END) AS t1,
+               MIN(CASE WHEN event_name = 'play'   THEN event_time END) AS t2,
+               MIN(CASE WHEN event_name = 'finish' THEN event_time END) AS t3
+        FROM events
+        WHERE content_id IS NOT NULL
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        GROUP BY 1, 2
+    ),
+    flag AS (
+        SELECT CASE WHEN t1 IS NOT NULL THEN 1 ELSE 0 END AS s1,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 THEN 1 ELSE 0 END AS s2,
+               CASE WHEN t1 IS NOT NULL AND t2 > t1 AND t3 > t2 THEN 1 ELSE 0 END AS s3
+        FROM pair
+    )
+    SELECT 1 AS step_no, 'click' AS step_name, SUM(s1) AS pair_cnt FROM flag
+    UNION ALL SELECT 2, 'play',   SUM(s2) FROM flag
+    UNION ALL SELECT 3, 'finish', SUM(s3) FROM flag
+    ORDER BY step_no;
+
+explanation: |
+  1. 有序漏斗的主体可以是 session、user，也可以是「user × 对象」，取决于业务口径。
+  2. 压平（多列条件 MIN）之后，顺序约束退化成时间戳比较，逻辑最清晰。
+  3. 条件层层继承，是保证漏斗单调递减的关键。
+
+pitfalls:
+  - GROUP BY 只写 user_id，把不同内容上的行为串成一条路径
+  - 第 3 步只判断 t3 > t2，漏掉 t2 > t1，出现下一步比上一步多的怪现象
+  - 忘记 content_id IS NOT NULL，impression/follow 事件混进来干扰分组
+
+capability_points: [funnel.ordered, funnel.flatten, funnel.subject_grain, funnel.monotonic]

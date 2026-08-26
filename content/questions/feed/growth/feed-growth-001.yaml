@@ -1,0 +1,77 @@
+id: feed-growth-001
+dataset: feed
+scenario: growth
+chain: feed-growth-chain-a
+chain_step: 1
+title: 月活 MAU 环比
+
+business_prompt: |
+  运营周报第一页：“全量 24 个月的 MAU（月度去重活跃用户数），
+   再加上上月 MAU 和环比增长率，按月份升序。”
+
+context_notes:
+  - MAU = 该月 daily_active 中的去重 user_id 数
+  - 环比 = (本月 - 上月) / 上月；首月无上月，返回 NULL
+  - 数据覆盖 2024-01 ~ 2025-12 共 24 个月
+
+tables: [daily_active]
+
+expected_columns:
+  - {name: ym, type: string}
+  - {name: mau, type: int}
+  - {name: prev_mau, type: int}
+  - {name: mom_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 先聚合出月表 (ym, mau)，环比一律在月表上做。
+  - LAG(mau) OVER (ORDER BY ym) 取上月；ym 是 'YYYY-MM' 字符串，字典序恰好等于时间序。
+  - 整数相减再相除要乘 1.0，否则可能被截断成 0。
+
+reference_sql: |
+  WITH monthly AS (
+      SELECT DATE_FORMAT(stat_date, '%Y-%m') AS ym,
+             COUNT(DISTINCT user_id) AS mau
+      FROM daily_active
+      GROUP BY 1
+  )
+  SELECT ym,
+         mau,
+         LAG(mau) OVER (ORDER BY ym) AS prev_mau,
+         ROUND((mau - LAG(mau) OVER (ORDER BY ym)) * 1.0
+             / NULLIF(LAG(mau) OVER (ORDER BY ym), 0), 4) AS mom_rate
+  FROM monthly
+  ORDER BY ym;
+
+alt_solutions:
+  - |
+    WITH monthly AS (
+        SELECT DATE_FORMAT(stat_date, '%Y-%m') AS ym,
+               COUNT(DISTINCT user_id) AS mau
+        FROM daily_active
+        GROUP BY 1
+    ),
+    w AS (
+        SELECT ym, mau, LAG(mau) OVER (ORDER BY ym) AS prev_mau
+        FROM monthly
+    )
+    SELECT ym, mau, prev_mau,
+           ROUND((mau - prev_mau) * 1.0 / NULLIF(prev_mau, 0), 4) AS mom_rate
+    FROM w
+    ORDER BY ym;
+
+explanation: |
+  1. 环比 = 与上一期比，本质是“错一行”，LAG 是最直接的实现。
+  2. 'YYYY-MM' 字符串的字典序与时间序一致，可以直接拿来排序（'2024-09' < '2024-10'）。
+  3. 把 LAG 结果先落成一列（alt 写法）能显著提升可读性，也避免写错三次。
+
+pitfalls:
+  - 用 DATE_FORMAT(stat_date,'%Y-%c') 之类无前导零的格式，字符串排序会乱（'2024-10' < '2024-9'）
+  - 忘记乘 1.0，整数除法把环比截成 0
+  - 对全量数据 COUNT(DISTINCT) 之前先做了别的聚合，导致去重口径丢失
+
+capability_points: [growth.mom, window.lag, agg.distinct_count, growth.safe_div]

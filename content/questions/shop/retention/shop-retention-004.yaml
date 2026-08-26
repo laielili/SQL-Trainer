@@ -1,0 +1,89 @@
+id: shop-retention-004
+dataset: shop
+scenario: retention
+chain: shop-retention-chain-a
+chain_step: 4
+title: 分注册渠道的次日留存对比（含未登记渠道）
+
+business_prompt: |
+  渠道投放要复盘质量：“按用户的注册渠道分组，看 2025 年注册用户的次日留存率。
+   注意有一批用户注册时没登记渠道，这批人要单独作为『未登记』一组，不能丢。”
+
+context_notes:
+  - 注册渠道来自 users.register_channel_id → dim_channel.channel_name，可能为 NULL
+  - 次日留存：注册后第 1 天有 status='completed' 的支付（DATEDIFF = 1）
+  - 注册日上界 2025-12-30，保证第 1 天仍在数据范围内
+
+tables: [users, orders, dim_channel]
+
+expected_columns:
+  - {name: channel_name, type: string}
+  - {name: reg_users, type: int}
+  - {name: d1_users, type: int}
+  - {name: d1_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_not_match:
+    - pattern: "(?is)register_channel_id\\s+is\\s+not\\s+null"
+      message: 未登记渠道的用户要保留并单独成组，不能过滤
+
+hints:
+  - 两次 LEFT JOIN：一次接渠道维表（保住 NULL 渠道），一次接订单（保住无支付用户）。
+  - COALESCE(c.channel_name, '未登记') 兜底，并且 GROUP BY 这个表达式。
+  - 分母是该渠道的注册人数，不是有支付的人数。
+
+reference_sql: |
+  SELECT COALESCE(c.channel_name, '未登记') AS channel_name,
+         COUNT(DISTINCT u.user_id) AS reg_users,
+         COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(o.pay_time AS DATE), u.register_date) = 1
+             THEN u.user_id END) AS d1_users,
+         ROUND(COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(o.pay_time AS DATE), u.register_date) = 1
+             THEN u.user_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT u.user_id), 0), 4) AS d1_rate
+  FROM users u
+  LEFT JOIN dim_channel c ON c.channel_id = u.register_channel_id
+  LEFT JOIN orders o
+         ON o.user_id = u.user_id
+        AND o.status = 'completed'
+        AND o.pay_time IS NOT NULL
+  WHERE u.register_date >= '2025-01-01'
+    AND u.register_date <= '2025-12-30'
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    WITH pay AS (
+        SELECT user_id, CAST(pay_time AS DATE) AS pd
+        FROM orders WHERE status = 'completed' AND pay_time IS NOT NULL
+    )
+    SELECT COALESCE(c.channel_name, '未登记') AS channel_name,
+           COUNT(DISTINCT u.user_id) AS reg_users,
+           COUNT(DISTINCT CASE WHEN DATEDIFF(p.pd, u.register_date) = 1
+                               THEN u.user_id END) AS d1_users,
+           ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(p.pd, u.register_date) = 1
+                                     THEN u.user_id END) * 1.0
+               / NULLIF(COUNT(DISTINCT u.user_id), 0), 4) AS d1_rate
+    FROM users u
+    LEFT JOIN dim_channel c ON c.channel_id = u.register_channel_id
+    LEFT JOIN pay p ON p.user_id = u.user_id
+    WHERE u.register_date BETWEEN '2025-01-01' AND '2025-12-30'
+    GROUP BY 1
+    ORDER BY 1;
+
+explanation: |
+  1. 分群留存的核心是“分母跟着分群走”，每个渠道用自己的注册人数当分母。
+  2. 维度缺失（NULL 渠道）不能一删了之，否则各渠道之和对不上总量。
+  3. 两个 LEFT JOIN 各司其职：一个保维度完整，一个保分母完整。
+
+pitfalls:
+  - INNER JOIN dim_channel，未登记渠道的一整群人消失
+  - 把 orders 的过滤条件写进 WHERE，LEFT JOIN 退化成 INNER JOIN
+  - GROUP BY c.channel_name 而不是 COALESCE 表达式，NULL 组显示为空白
+
+capability_points: [retention.cohort_dimension, retention.denominator, agg.null_handling]

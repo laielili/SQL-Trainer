@@ -1,0 +1,103 @@
+id: feed-funnel-001
+dataset: feed
+scenario: funnel
+chain: feed-funnel-chain-a
+chain_step: 1
+title: 消费漏斗 曝光→点击→播放→完播
+
+business_prompt: |
+  推荐团队看消费漏斗：“2025 年，曝光 / 点击 / 播放 / 完播 四步各有多少去重用户，
+   再给出相邻步骤转化率和相对曝光的整体转化率。”
+
+context_notes:
+  - 四步事件名：impression / click / play / finish
+  - 人数 = COUNT(DISTINCT user_id)，无序口径（只看是否发生过）
+  - 第 1 步的 step_conv_rate 为 NULL，total_conv_rate 为 1.0
+
+tables: [events]
+
+expected_columns:
+  - {name: step_no, type: int}
+  - {name: step_name, type: string}
+  - {name: user_cnt, type: int}
+  - {name: step_conv_rate, type: decimal, tolerance: 0.0001}
+  - {name: total_conv_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\bover\\s*\\("
+      message: 相邻步骤/首行取值请用窗口函数
+
+hints:
+  - 先用 CASE 把 event_name 映射成 step_no，聚合出四行小表。
+  - LAG(user_cnt) OVER (ORDER BY step_no) 拿上一步人数。
+  - FIRST_VALUE(user_cnt) OVER (ORDER BY step_no) 拿第一步人数。
+
+reference_sql: |
+  WITH base AS (
+      SELECT CASE event_name
+                 WHEN 'impression' THEN 1
+                 WHEN 'click'      THEN 2
+                 WHEN 'play'       THEN 3
+                 ELSE 4
+             END AS step_no,
+             event_name AS step_name,
+             COUNT(DISTINCT user_id) AS user_cnt
+      FROM events
+      WHERE event_name IN ('impression', 'click', 'play', 'finish')
+        AND event_time >= '2025-01-01'
+        AND event_time <  '2026-01-01'
+      GROUP BY 1, 2
+  )
+  SELECT step_no,
+         step_name,
+         user_cnt,
+         ROUND(user_cnt * 1.0
+             / NULLIF(LAG(user_cnt) OVER (ORDER BY step_no), 0), 4) AS step_conv_rate,
+         ROUND(user_cnt * 1.0
+             / NULLIF(FIRST_VALUE(user_cnt) OVER (ORDER BY step_no), 0), 4) AS total_conv_rate
+  FROM base
+  ORDER BY step_no;
+
+alt_solutions:
+  - |
+    WITH base AS (
+        SELECT 1 AS step_no, 'impression' AS step_name, COUNT(DISTINCT user_id) AS user_cnt
+        FROM events WHERE event_name='impression'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        UNION ALL
+        SELECT 2, 'click', COUNT(DISTINCT user_id) FROM events WHERE event_name='click'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        UNION ALL
+        SELECT 3, 'play', COUNT(DISTINCT user_id) FROM events WHERE event_name='play'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+        UNION ALL
+        SELECT 4, 'finish', COUNT(DISTINCT user_id) FROM events WHERE event_name='finish'
+          AND event_time >= '2025-01-01' AND event_time < '2026-01-01'
+    ),
+    w AS (
+        SELECT step_no, step_name, user_cnt,
+               LAG(user_cnt) OVER (ORDER BY step_no) AS prev_cnt,
+               MAX(CASE WHEN step_no = 1 THEN user_cnt END) OVER () AS first_cnt
+        FROM base
+    )
+    SELECT step_no, step_name, user_cnt,
+           ROUND(user_cnt * 1.0 / NULLIF(prev_cnt, 0), 4) AS step_conv_rate,
+           ROUND(user_cnt * 1.0 / NULLIF(first_cnt, 0), 4) AS total_conv_rate
+    FROM w
+    ORDER BY step_no;
+
+explanation: |
+  1. 漏斗的顺序不能靠字母序，必须显式造一个 step_no。
+  2. 单步转化率定位瓶颈环节，整体转化率衡量端到端效率，两者要一起看。
+  3. MAX(...) OVER () 是取“全局某个值”的常用技巧，可替代 FIRST_VALUE。
+
+pitfalls:
+  - 按 event_name 排序，漏斗顺序变成 click < finish < impression < play
+  - COUNT(*) 代替 COUNT(DISTINCT user_id)，曝光被重复埋点放大数倍
+  - 第 4 步用 ELSE 4 兜底时忘了 WHERE 过滤，其它事件被误归为 finish
+
+capability_points: [funnel.unordered, funnel.conv_rate, window.lag, window.first_value]

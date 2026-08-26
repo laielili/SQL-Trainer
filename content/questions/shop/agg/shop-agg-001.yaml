@@ -1,0 +1,71 @@
+id: shop-agg-001
+dataset: shop
+scenario: agg
+chain: shop-agg-chain-a
+chain_step: 1
+title: 2025 年各一级品类实付 GMV 与订单数
+
+business_prompt: |
+  品类运营在群里 @ 你：
+  “年度复盘要用，帮我拉一下 2025 年每个一级品类的实付 GMV，还有这个品类下了多少笔订单，
+   按 GMV 从高到低排。我要拿去跟去年横向对比。”
+
+context_notes:
+  - 实付金额 = 订单明细 order_items.item_amount 之和（落到明细粒度，避免多商品订单重复计入）
+  - 已取消（cancelled）和已退款（refunded）的订单不计入销售额
+  - 一笔订单可能含多个明细，订单数要用 COUNT(DISTINCT order_id)
+
+tables: [orders, order_items, dim_product]
+
+expected_columns:
+  - {name: cat_l1, type: string}
+  - {name: gmv, type: decimal, tolerance: 0.01}
+  - {name: order_cnt, type: int}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 实付金额应该落在 order_items 明细上求和，而不是直接用 orders.pay_amount 然后 GROUP BY 品类——那样会漏掉明细粒度。
+  - 排除哪些订单状态？cancelled 和 refunded 不能算销售额。
+  - 订单数必须用 COUNT(DISTINCT o.order_id)，否则一个订单多明细会被算成多笔。
+
+reference_sql: |
+  SELECT p.cat_l1,
+         SUM(oi.item_amount) AS gmv,
+         COUNT(DISTINCT o.order_id) AS order_cnt
+  FROM order_items oi
+  JOIN orders o ON o.order_id = oi.order_id
+  JOIN dim_product p ON p.product_id = oi.product_id
+  WHERE o.order_time >= '2025-01-01'
+    AND o.order_time <  '2026-01-01'
+    AND o.status NOT IN ('cancelled', 'refunded')
+  GROUP BY p.cat_l1
+  ORDER BY gmv DESC;
+
+alt_solutions:
+  - |
+    SELECT p.cat_l1,
+           SUM(oi.item_amount) AS gmv,
+           COUNT(DISTINCT o.order_id) AS order_cnt
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.order_id
+    JOIN dim_product p ON p.product_id = oi.product_id
+    WHERE o.status NOT IN ('cancelled', 'refunded')
+      AND o.order_time BETWEEN '2025-01-01' AND '2025-12-31 23:59:59'
+    GROUP BY p.cat_l1
+    ORDER BY gmv DESC;
+
+explanation: |
+  1. 口径：实付金额必须聚合到 order_items 明细，再按品类分组。
+  2. 去重：一笔订单可能多个明细，订单数用 COUNT(DISTINCT order_id)。
+  3. 过滤：cancelled / refunded 不计入销售额，这是业务口径的硬要求。
+
+pitfalls:
+  - 直接 SUM(orders.pay_amount) 然后 GROUP BY 品类，会丢失明细粒度且和参考解对不上
+  - 忘记排除 cancelled / refunded，GMV 虚高
+  - 订单数用了 COUNT(*) 而非 COUNT(DISTINCT order_id)，被明细行数放大
+
+capability_points: [agg.multi_group, agg.distinct_count]

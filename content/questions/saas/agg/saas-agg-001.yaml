@@ -1,0 +1,73 @@
+id: saas-agg-001
+dataset: saas
+scenario: agg
+chain: saas-agg-chain-a
+chain_step: 1
+title: 行业 × 公司规模的账号盘子与在租 MRR
+
+business_prompt: |
+  销售运营要看客户结构：“按行业和公司规模两个维度，统计账号数、
+   处于 active 状态的订阅数，以及这些 active 订阅的 MRR 合计。
+   没有任何订阅的账号也要出现在结果里。”
+
+context_notes:
+  - 账号数是 accounts 的去重 account_id 数，与是否有订阅无关
+  - active 订阅 = subscriptions.status = 'active'
+  - MRR 合计保留 2 位小数；没有 active 订阅的组应为 0 而非 NULL
+
+tables: [accounts, subscriptions]
+
+expected_columns:
+  - {name: industry, type: string}
+  - {name: company_size, type: string}
+  - {name: account_cnt, type: int}
+  - {name: active_subs, type: int}
+  - {name: active_mrr, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 500
+
+constraints:
+  must_match:
+    - pattern: "(?is)left\\s+join"
+      message: 没有订阅的账号也要保留，请用 LEFT JOIN
+
+hints:
+  - “账号也要出现”意味着以 accounts 为主表做 LEFT JOIN。
+  - 过滤 active 不能写进 WHERE，否则 LEFT JOIN 退化；要写进 CASE WHEN。
+  - SUM(CASE WHEN ... THEN mrr ELSE 0 END) 保证无匹配时得到 0。
+
+reference_sql: |
+  SELECT a.industry,
+         a.company_size,
+         COUNT(DISTINCT a.account_id) AS account_cnt,
+         COUNT(DISTINCT CASE WHEN s.status = 'active' THEN s.sub_id END) AS active_subs,
+         ROUND(SUM(CASE WHEN s.status = 'active' THEN s.mrr ELSE 0 END), 2) AS active_mrr
+  FROM accounts a
+  LEFT JOIN subscriptions s ON s.account_id = a.account_id
+  GROUP BY a.industry, a.company_size
+  ORDER BY a.industry, a.company_size;
+
+alt_solutions:
+  - |
+    SELECT a.industry,
+           a.company_size,
+           COUNT(DISTINCT a.account_id) AS account_cnt,
+           COUNT(DISTINCT CASE WHEN s.status = 'active' THEN s.sub_id ELSE NULL END) AS active_subs,
+           ROUND(COALESCE(SUM(CASE WHEN s.status = 'active' THEN s.mrr END), 0), 2) AS active_mrr
+    FROM accounts a
+    LEFT JOIN subscriptions s ON s.account_id = a.account_id
+    GROUP BY 1, 2
+    ORDER BY 1, 2;
+
+explanation: |
+  1. “主表保全”是 LEFT JOIN 的目的，任何针对从表的过滤都必须搬进 ON 或 CASE。
+  2. COUNT(DISTINCT CASE WHEN ... THEN x END) 是在同一次扫描里算多个口径的标准手段。
+  3. SUM 对空集返回 NULL，用 ELSE 0 或 COALESCE 兜底成 0，报表才不会出现空格。
+
+pitfalls:
+  - 把 s.status='active' 写进 WHERE，无订阅账号整行消失，account_cnt 失真
+  - COUNT(s.sub_id) 不去重不加条件，把 churned/trialing 都算成活跃
+  - SUM 返回 NULL 没兜底，前端展示成空白
+
+capability_points: [agg.multi_dim, agg.left_join_preserve, agg.conditional_agg, agg.null_handling]

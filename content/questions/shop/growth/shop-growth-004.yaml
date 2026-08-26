@@ -1,0 +1,97 @@
+id: shop-growth-004
+dataset: shop
+scenario: growth
+chain: shop-growth-chain-a
+chain_step: 4
+title: 分渠道月度 GMV 环比（组内错行）
+
+business_prompt: |
+  渠道运营要分渠道看：“2025 年每个渠道、每个月的实付 GMV 和环比增长率。
+   注意每个渠道各自跟自己的上个月比，别串到别的渠道去了。”
+
+context_notes:
+  - 渠道取 orders.channel_id 关联 dim_channel.channel_name
+  - 环比 = (本月 - 本渠道上月) / 本渠道上月；1 月因为没有上月，环比为 NULL
+  - GMV 口径同前：order_items.item_amount，排除 cancelled/refunded，pay_time 非空
+
+tables: [orders, order_items, dim_channel]
+
+expected_columns:
+  - {name: channel_name, type: string}
+  - {name: mon, type: int}
+  - {name: gmv, type: decimal, tolerance: 0.01}
+  - {name: prev_gmv, type: decimal, tolerance: 0.01}
+  - {name: mom_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 1000
+
+constraints:
+  must_match:
+    - pattern: "(?is)partition\\s+by"
+      message: 分组内错行请用 PARTITION BY，不要对全表 LAG
+
+hints:
+  - LAG 默认在整个结果集里错行，必须用 PARTITION BY channel_name 把每个渠道隔开。
+  - PARTITION BY 决定“在谁内部错行”，ORDER BY 决定“按什么顺序错行”。
+  - 1 月的 prev_gmv 天然为 NULL，环比也应为 NULL，不要 COALESCE 成 0。
+
+reference_sql: |
+  WITH monthly AS (
+      SELECT c.channel_name,
+             MONTH(o.order_time) AS mon,
+             SUM(oi.item_amount) AS gmv
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      JOIN dim_channel c ON c.channel_id = o.channel_id
+      WHERE o.order_time >= '2025-01-01'
+        AND o.order_time <  '2026-01-01'
+        AND o.status NOT IN ('cancelled', 'refunded')
+        AND o.pay_time IS NOT NULL
+      GROUP BY 1, 2
+  )
+  SELECT channel_name,
+         mon,
+         gmv,
+         LAG(gmv) OVER (PARTITION BY channel_name ORDER BY mon) AS prev_gmv,
+         ROUND((gmv - LAG(gmv) OVER (PARTITION BY channel_name ORDER BY mon))
+             / NULLIF(LAG(gmv) OVER (PARTITION BY channel_name ORDER BY mon), 0), 4) AS mom_rate
+  FROM monthly
+  ORDER BY channel_name, mon;
+
+alt_solutions:
+  - |
+    WITH monthly AS (
+        SELECT c.channel_name,
+               MONTH(o.order_time) AS mon,
+               SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        JOIN dim_channel c ON c.channel_id = o.channel_id
+        WHERE o.order_time >= '2025-01-01'
+          AND o.order_time <  '2026-01-01'
+          AND o.status NOT IN ('cancelled', 'refunded')
+          AND o.pay_time IS NOT NULL
+        GROUP BY 1, 2
+    ),
+    withprev AS (
+        SELECT channel_name, mon, gmv,
+               LAG(gmv) OVER (PARTITION BY channel_name ORDER BY mon) AS prev_gmv
+        FROM monthly
+    )
+    SELECT channel_name, mon, gmv, prev_gmv,
+           ROUND((gmv - prev_gmv) / NULLIF(prev_gmv, 0), 4) AS mom_rate
+    FROM withprev
+    ORDER BY channel_name, mon;
+
+explanation: |
+  1. PARTITION BY 是窗口函数的“分组墙”，没有它 LAG 会跨渠道取到别人的上月。
+  2. 重复三次 LAG 表达式可读性差，推荐先在 CTE 里落一列 prev_gmv 再算比率。
+  3. 每个渠道的首月 prev_gmv 为 NULL，是正确结果而不是缺陷。
+
+pitfalls:
+  - 漏写 PARTITION BY，渠道 A 的 1 月拿到渠道 B 的 12 月做基期
+  - ORDER BY 只写在最外层 SELECT，窗口内部没有排序 → LAG 结果不确定
+  - 把 NULL 环比 COALESCE 成 0，掩盖“无基期”这一事实
+
+capability_points: [growth.mom, window.partition, growth.safe_div]

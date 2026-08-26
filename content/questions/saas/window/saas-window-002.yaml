@@ -1,0 +1,78 @@
+id: saas-window-002
+dataset: saas
+scenario: window
+chain: saas-window-chain-a
+chain_step: 2
+title: 套餐迁移矩阵（上一档 → 这一档）
+
+business_prompt: |
+  产品要看套餐流动：“对每个账号，把它的订阅按开始日期排序，
+   找出所有『上一份订阅的套餐』和『这一份订阅的套餐』不一样的情况，
+   统计各种迁移路径各出现了多少次，次数多的在前。”
+
+context_notes:
+  - 排序键 start_date；同一天多份订阅时用 sub_id 决胜，保证顺序确定
+  - 账号的第一份订阅没有“上一档”，应排除
+  - 只保留 prev_plan <> plan 的迁移记录（同档续订不算迁移）
+
+tables: [subscriptions]
+
+expected_columns:
+  - {name: prev_plan, type: string}
+  - {name: plan, type: string}
+  - {name: change_cnt, type: int}
+
+order_sensitive: false
+row_limit: 200
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\blag\\s*\\("
+      message: 取“上一份订阅”请用 LAG 窗口函数
+
+hints:
+  - LAG(plan) OVER (PARTITION BY account_id ORDER BY start_date, sub_id) 就是上一档。
+  - 第一份订阅的 prev_plan 为 NULL，要过滤掉。
+  - 迁移矩阵 = GROUP BY (prev_plan, plan) 之后计数。
+
+reference_sql: |
+  WITH seq AS (
+      SELECT account_id,
+             sub_id,
+             plan,
+             LAG(plan) OVER (PARTITION BY account_id ORDER BY start_date, sub_id) AS prev_plan
+      FROM subscriptions
+  )
+  SELECT prev_plan,
+         plan,
+         COUNT(*) AS change_cnt
+  FROM seq
+  WHERE prev_plan IS NOT NULL
+    AND prev_plan <> plan
+  GROUP BY prev_plan, plan
+  ORDER BY change_cnt DESC, prev_plan, plan;
+
+alt_solutions:
+  - |
+    SELECT prev_plan, plan, COUNT(*) AS change_cnt
+    FROM (
+        SELECT plan,
+               LAG(plan) OVER (PARTITION BY account_id ORDER BY start_date ASC, sub_id ASC) AS prev_plan
+        FROM subscriptions
+    ) t
+    WHERE prev_plan IS NOT NULL
+      AND prev_plan != plan
+    GROUP BY 1, 2
+    ORDER BY change_cnt DESC, prev_plan, plan;
+
+explanation: |
+  1. “状态迁移矩阵”是 LAG 的高频应用：把纵向的时间序列变成横向的前后配对。
+  2. 排序键必须唯一，否则同一天的多份订阅谁在前不确定，迁移结果会抖动。
+  3. 过滤 prev_plan IS NOT NULL 相当于丢掉每个账号的首份订阅，这是正确的。
+
+pitfalls:
+  - 漏写 PARTITION BY account_id，上一份订阅取到了别的账号的
+  - 用 <> 比较时 prev_plan 为 NULL，NULL <> 'pro' 结果是 NULL 而不是 TRUE，必须先判非空
+  - ORDER BY 只写 start_date，同日多单顺序不稳定
+
+capability_points: [window.lag, window.partition, window.transition_matrix, window.tie_breaker]

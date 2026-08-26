@@ -1,0 +1,87 @@
+id: saas-retention-001
+dataset: saas
+scenario: retention
+chain: saas-retention-chain-a
+chain_step: 1
+title: 新签账号的 30 日功能激活留存
+
+business_prompt: |
+  客户成功要看新客上手情况：“按账号注册月分群，统计分群账号数，
+   以及注册后 1~30 天内产生过任意功能使用记录的账号数和占比。”
+
+context_notes:
+  - 注册日 = accounts.signup_date；活跃 = feature_usage 有记录
+  - 窗口 [注册日+1天, 注册日+30天]，不含注册当天
+  - 分群范围 2024-01-01 ~ 2025-12-01，保证 +30 天仍在数据内
+
+tables: [accounts, feature_usage]
+
+expected_columns:
+  - {name: cohort_month, type: string}
+  - {name: cohort_accounts, type: int}
+  - {name: d30_accounts, type: int}
+  - {name: d30_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 用 LEFT JOIN feature_usage，条件里不要写日期范围（否则分母塌陷）。
+  - 天数差 DATEDIFF(CAST(use_time AS DATE), a.signup_date) BETWEEN 1 AND 30。
+  - 分子是 COUNT(DISTINCT CASE WHEN ... THEN account_id END)。
+
+reference_sql: |
+  SELECT DATE_FORMAT(a.signup_date, '%Y-%m') AS cohort_month,
+         COUNT(DISTINCT a.account_id) AS cohort_accounts,
+         COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(f.use_time AS DATE), a.signup_date) BETWEEN 1 AND 30
+             THEN a.account_id END) AS d30_accounts,
+         ROUND(COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(f.use_time AS DATE), a.signup_date) BETWEEN 1 AND 30
+             THEN a.account_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT a.account_id), 0), 4) AS d30_rate
+  FROM accounts a
+  LEFT JOIN feature_usage f ON f.account_id = a.account_id
+  WHERE a.signup_date >= '2024-01-01'
+    AND a.signup_date <= '2025-12-01'
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    WITH act AS (
+        SELECT DISTINCT account_id, CAST(use_time AS DATE) AS ud
+        FROM feature_usage
+    ),
+    flag AS (
+        SELECT a.account_id,
+               DATE_FORMAT(a.signup_date, '%Y-%m') AS cohort_month,
+               MAX(CASE WHEN DATEDIFF(t.ud, a.signup_date) >= 1
+                         AND DATEDIFF(t.ud, a.signup_date) <= 30
+                        THEN 1 ELSE 0 END) AS retained
+        FROM accounts a
+        LEFT JOIN act t ON t.account_id = a.account_id
+        WHERE a.signup_date >= '2024-01-01' AND a.signup_date <= '2025-12-01'
+        GROUP BY a.account_id, 2
+    )
+    SELECT cohort_month,
+           COUNT(*) AS cohort_accounts,
+           SUM(retained) AS d30_accounts,
+           ROUND(SUM(retained) * 1.0 / NULLIF(COUNT(*), 0), 4) AS d30_rate
+    FROM flag
+    GROUP BY cohort_month
+    ORDER BY cohort_month;
+
+explanation: |
+  1. B 端留存的锚点通常是签约日，观察对象是“账号”而非“用户”。
+  2. 先按账号打标（retained 0/1）再按分群汇总（alt 写法），比一层写完更易调试。
+  3. LEFT JOIN + CASE 的组合保证分母是全部新签账号。
+
+pitfalls:
+  - 把 DATEDIFF 条件写进 ON 或 WHERE，无活跃账号被排除，留存率虚高
+  - 用 COUNT(DISTINCT f.account_id) 当分子，等于“任何时候活跃过”，窗口失效
+  - 分群上界没卡，最后一个月的 30 日窗口天然不完整
+
+capability_points: [retention.anchor, retention.nday, retention.denominator, retention.boundary]

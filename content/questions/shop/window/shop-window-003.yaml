@@ -1,0 +1,70 @@
+id: shop-window-003
+dataset: shop
+scenario: window
+chain: shop-window-chain-a
+chain_step: 3
+title: 每个用户的累计消费金额
+
+business_prompt: |
+  风控要画用户消费曲线：“给我每个用户每一笔已完成订单的实付金额，以及到该笔为止的累计消费金额，
+   按 user_id、支付时间排序。”
+
+context_notes:
+  - 只看 status='completed' 且 pay_time 非空的订单
+  - 累计 = 同一个用户、按支付时间升序、从第一行到当前行的 SUM
+  - 用窗口 SUM() OVER (PARTITION BY user_id ORDER BY pay_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+
+tables: [orders]
+
+expected_columns:
+  - {name: user_id, type: int}
+  - {name: pay_time, type: timestamp}
+  - {name: pay_amount, type: decimal, tolerance: 0.01}
+  - {name: cum_pay, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 2000
+
+constraints: {}
+
+hints:
+  - 累计窗口：PARTITION BY user_id ORDER BY pay_time，帧用 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW。
+  - 只统计已完成且已支付的订单。
+  - 结果按 user_id, pay_time 排序即可。
+
+reference_sql: |
+  WITH paid AS (
+      SELECT user_id, pay_time, pay_amount, order_id
+      FROM orders
+      WHERE status = 'completed' AND pay_time IS NOT NULL
+  )
+  SELECT user_id, pay_time, pay_amount,
+         SUM(pay_amount) OVER (
+             PARTITION BY user_id
+             ORDER BY pay_time, order_id
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_pay
+  FROM paid
+  ORDER BY user_id, pay_time;
+
+alt_solutions:
+  - |
+    SELECT user_id, pay_time, pay_amount,
+           SUM(pay_amount) OVER (
+               PARTITION BY user_id
+               ORDER BY pay_time, order_id
+               ROWS UNBOUNDED PRECEDING) AS cum_pay
+    FROM orders
+    WHERE status = 'completed' AND pay_time IS NOT NULL
+    ORDER BY user_id, pay_time;
+
+explanation: |
+  1. 累计帧：ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW 从首行累加到当前。
+  2. 分区：按 user_id 各自累计。
+  3. 稳定：ORDER BY 加 order_id 次要键，重复 pay_time 时结果稳定。
+
+pitfalls:
+  - 忘记加帧定义，默认帧在有并列时可能用 RANGE 导致多行被一起累计
+  - 把未支付订单（pay_amount=0）混入累计
+  - 用自连接相关子查询也能做，但窗口写法更直观
+
+capability_points: [window.cumulative, window.frame_trap]

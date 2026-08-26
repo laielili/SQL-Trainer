@@ -1,0 +1,91 @@
+id: saas-window-001
+dataset: saas
+scenario: window
+chain: saas-window-chain-a
+chain_step: 1
+title: 每个行业的 MRR Top3 大客户
+
+business_prompt: |
+  客户成功团队要重点名单：“每个行业里，按 active 订阅的 MRR 合计排名，
+   给我前 3 大账号，带上名次。金额相同的话按 account_id 小的在前，只要 3 个。”
+
+context_notes:
+  - 只统计 status='active' 的订阅
+  - 账号 MRR = 该账号所有 active 订阅的 mrr 之和，保留 2 位小数
+  - “只要 3 个 + 并列按 account_id 决胜”意味着用 ROW_NUMBER 而非 DENSE_RANK
+
+tables: [accounts, subscriptions]
+
+expected_columns:
+  - {name: industry, type: string}
+  - {name: account_id, type: int}
+  - {name: mrr, type: decimal, tolerance: 0.01}
+  - {name: rn, type: int}
+
+order_sensitive: false
+row_limit: 200
+
+constraints:
+  must_match:
+    - pattern: "(?is)row_number\\s*\\(\\s*\\)"
+      message: 每组固定取 3 个且需要唯一决胜，请用 ROW_NUMBER
+  must_not_match:
+    - pattern: "(?is)\\blimit\\s+3\\b"
+      message: LIMIT 3 只能取全局前 3，做不到分组 TopN
+
+hints:
+  - 先按 (industry, account_id) 聚合出 MRR，再开窗排名。
+  - ROW_NUMBER 需要完整的排序键：ORDER BY mrr DESC, account_id ASC。
+  - 名次过滤必须放在外层（子查询/CTE 之外）。
+
+reference_sql: |
+  WITH acc_mrr AS (
+      SELECT a.industry,
+             a.account_id,
+             SUM(s.mrr) AS mrr
+      FROM accounts a
+      JOIN subscriptions s ON s.account_id = a.account_id
+      WHERE s.status = 'active'
+      GROUP BY a.industry, a.account_id
+  ),
+  ranked AS (
+      SELECT industry, account_id, mrr,
+             ROW_NUMBER() OVER (PARTITION BY industry ORDER BY mrr DESC, account_id ASC) AS rn
+      FROM acc_mrr
+  )
+  SELECT industry,
+         account_id,
+         ROUND(mrr, 2) AS mrr,
+         rn
+  FROM ranked
+  WHERE rn <= 3
+  ORDER BY industry, rn;
+
+alt_solutions:
+  - |
+    SELECT industry, account_id, ROUND(mrr, 2) AS mrr, rn
+    FROM (
+        SELECT a.industry,
+               a.account_id,
+               SUM(s.mrr) AS mrr,
+               ROW_NUMBER() OVER (PARTITION BY a.industry
+                                  ORDER BY SUM(s.mrr) DESC, a.account_id) AS rn
+        FROM accounts a
+        JOIN subscriptions s ON s.account_id = a.account_id
+        WHERE s.status = 'active'
+        GROUP BY a.industry, a.account_id
+    ) t
+    WHERE rn <= 3
+    ORDER BY industry, rn;
+
+explanation: |
+  1. ROW_NUMBER 保证每组严格 N 条，代价是并列时必须自己给定决胜规则。
+  2. 窗口函数可以直接写在带 GROUP BY 的 SELECT 里，此时它作用于聚合后的行（alt 写法）。
+  3. 分组 TopN 与全局 TopN 完全不同，LIMIT 解决不了前者。
+
+pitfalls:
+  - 只写 ORDER BY mrr DESC，并列时谁进前 3 随执行计划变化
+  - 用 DENSE_RANK 导致某些行业返回超过 3 行
+  - 忘记 WHERE s.status='active'，把 churned 的历史 MRR 也算进来
+
+capability_points: [window.row_number, window.partition, window.topn, window.tie_breaker]

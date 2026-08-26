@@ -1,0 +1,312 @@
+dataset: shop
+tables:
+- name: dim_date
+  comment: 日期维表（连续 2024-01-01 ~ 2025-12-31，含闰年）
+  columns:
+  - name: date_key
+    type: DATE
+    comment: 日期
+    pk: true
+  - name: y
+    type: INTEGER
+    comment: 年
+    pk: false
+  - name: q
+    type: INTEGER
+    comment: 季度 1-4
+    pk: false
+  - name: m
+    type: INTEGER
+    comment: 月 1-12
+    pk: false
+  - name: w
+    type: INTEGER
+    comment: 年周序号 y*100+week
+    pk: false
+  - name: dow
+    type: INTEGER
+    comment: 周几 1=Mon..7=Sun
+    pk: false
+  - name: is_weekend
+    type: BOOLEAN
+    comment: 是否周末
+    pk: false
+  - name: is_holiday
+    type: BOOLEAN
+    comment: 是否节假日
+    pk: false
+  - name: last_year_same_date
+    type: DATE
+    comment: 去年同期日期
+    pk: false
+  - name: prev_month_date
+    type: DATE
+    comment: 上月同日
+    pk: false
+- name: dim_channel
+  comment: 渠道维表
+  columns:
+  - name: channel_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: channel_name
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: channel_type
+    type: VARCHAR
+    comment: app / web / offline / mini_program
+    pk: false
+    enum:
+    - app
+    - web
+    - offline
+    - mini_program
+- name: dim_city
+  comment: 城市维表
+  columns:
+  - name: city_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: city_name
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: province
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: region
+    type: VARCHAR
+    comment: north / east / south / west / central
+    pk: false
+    enum:
+    - north
+    - east
+    - south
+    - west
+    - central
+  - name: city_tier
+    type: INTEGER
+    comment: 1 / 2 / 3 / 4
+    pk: false
+- name: dim_product
+  comment: 商品维表
+  columns:
+  - name: product_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: product_name
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: cat_l1
+    type: VARCHAR
+    comment: 一级品类：手机 / 电脑 / 家电 / 服饰 / 美妆 / 食品
+    pk: false
+  - name: cat_l2
+    type: VARCHAR
+    comment: 二级品类
+    pk: false
+  - name: brand
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: list_price
+    type: DOUBLE
+    comment: 标价
+    pk: false
+  - name: launch_date
+    type: DATE
+    comment: 上市日期
+    pk: false
+  - name: is_new
+    type: BOOLEAN
+    comment: 是否新品（上市 < 180 天）
+    pk: false
+- name: users
+  comment: 用户表
+  columns:
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: register_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: register_channel_id
+    type: INTEGER
+    comment: 可为 NULL（埋坑：未登记渠道）
+    pk: false
+  - name: city_id
+    type: INTEGER
+    comment: 可为 NULL（埋坑：未填城市）
+    pk: false
+  - name: gender
+    type: VARCHAR
+    comment: M / F / U（U=未知）
+    pk: false
+    enum:
+    - M
+    - F
+    - U
+  - name: age_band
+    type: VARCHAR
+    comment: 18-25 / 26-35 / 36-45 / 46-55 / 55+
+    pk: false
+    enum:
+    - 18-25
+    - 26-35
+    - 36-45
+    - 46-55
+    - 55+
+- name: orders
+  comment: 订单主表
+  columns:
+  - name: order_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: order_time
+    type: TIMESTAMP
+    comment: ''
+    pk: false
+  - name: pay_time
+    type: TIMESTAMP
+    comment: NULL = 未支付（埋坑）
+    pk: false
+  - name: status
+    type: VARCHAR
+    comment: created/paid/shipped/completed/cancelled/refunded
+    pk: false
+    enum:
+    - created
+    - paid
+    - shipped
+    - completed
+    - cancelled
+    - refunded
+  - name: channel_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: total_amount
+    type: DOUBLE
+    comment: 含折扣前
+    pk: false
+  - name: discount_amount
+    type: DOUBLE
+    comment: ''
+    pk: false
+  - name: pay_amount
+    type: DOUBLE
+    comment: 实付 = total - discount（未支付时为 0）
+    pk: false
+- name: order_items
+  comment: 订单明细
+  columns:
+  - name: order_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: item_seq
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: product_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: qty
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: unit_price
+    type: DOUBLE
+    comment: ''
+    pk: false
+  - name: item_amount
+    type: DOUBLE
+    comment: = qty * unit_price
+    pk: false
+  - name: PRIMARY
+    type: KEY
+    comment: ''
+    pk: false
+- name: refunds
+  comment: 退款表
+  columns:
+  - name: refund_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: order_id
+    type: INTEGER
+    comment: 对应 status='refunded' 的订单
+    pk: false
+  - name: refund_time
+    type: TIMESTAMP
+    comment: ''
+    pk: false
+  - name: refund_amount
+    type: DOUBLE
+    comment: ''
+    pk: false
+  - name: reason
+    type: VARCHAR
+    comment: 质量问题 / 七天无理由 / 发错货 / 其他
+    pk: false
+    enum:
+    - 质量问题
+    - 七天无理由
+    - 发错货
+    - 其他
+- name: events
+  comment: 埋点事件表
+  columns:
+  - name: event_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: session_id
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: event_time
+    type: TIMESTAMP
+    comment: ''
+    pk: false
+  - name: event_name
+    type: VARCHAR
+    comment: view_home/view_product/add_cart/submit_order/pay_success
+    pk: false
+    enum:
+    - view_home
+    - view_product
+    - add_cart
+    - submit_order
+    - pay_success
+  - name: page
+    type: VARCHAR
+    comment: 部分事件无 page（NULL）
+    pk: false
+  - name: product_id
+    type: INTEGER
+    comment: 仅 view_product/add_cart/submit_order/pay_success 有值
+    pk: false
+  - name: channel_id
+    type: INTEGER
+    comment: 部分事件无渠道（NULL）
+    pk: false

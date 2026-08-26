@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tool / editor
+.workbuddy/
+.idea/
+.vscode/
+.DS_Store
+
+# Generated data (rebuild with scripts/build_datasets.py)
+data/duckdb/*.duckdb
+
+# Runtime artifacts
+runtime/
+*.log
+*.sqlite

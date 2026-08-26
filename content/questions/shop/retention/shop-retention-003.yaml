@@ -1,0 +1,100 @@
+id: shop-retention-003
+dataset: shop
+scenario: retention
+chain: shop-retention-chain-a
+chain_step: 3
+title: D1 / D7 / D30 留存曲线一次算完
+
+business_prompt: |
+  增长负责人要一张留存曲线表：“还是按注册月分群，一行一个月，
+   同时给我 D1、D7、D30 三个留存率，方便看衰减斜率。”
+
+context_notes:
+  - 留存口径改为“行为留存”：注册后第 N 天区间内发生过任意一笔 status='completed' 的支付
+  - D1 = 第 1 天当天；D7 = 第 1~7 天；D30 = 第 1~30 天（都不含注册当天）
+  - 天数差用 DATEDIFF(支付日期, 注册日期)；支付日期取 CAST(pay_time AS DATE)
+  - 注册日上界取 2025-12-01，避免 +30 天推出数据范围
+
+tables: [users, orders]
+
+expected_columns:
+  - {name: reg_month, type: string}
+  - {name: reg_users, type: int}
+  - {name: d1_rate, type: decimal, tolerance: 0.0001}
+  - {name: d7_rate, type: decimal, tolerance: 0.0001}
+  - {name: d30_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 一次 LEFT JOIN orders，然后靠三组 COUNT(DISTINCT CASE WHEN ...) 同时算三个窗口。
+  - 天数差写 DATEDIFF(CAST(o.pay_time AS DATE), u.register_date)，注意参数顺序是“后 - 前”。
+  - 三个分母都是同一个 COUNT(DISTINCT u.user_id)，用 NULLIF 防除零。
+
+reference_sql: |
+  SELECT DATE_FORMAT(u.register_date, '%Y-%m') AS reg_month,
+         COUNT(DISTINCT u.user_id) AS reg_users,
+         ROUND(COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(o.pay_time AS DATE), u.register_date) = 1
+             THEN u.user_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT u.user_id), 0), 4) AS d1_rate,
+         ROUND(COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(o.pay_time AS DATE), u.register_date) BETWEEN 1 AND 7
+             THEN u.user_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT u.user_id), 0), 4) AS d7_rate,
+         ROUND(COUNT(DISTINCT CASE
+             WHEN DATEDIFF(CAST(o.pay_time AS DATE), u.register_date) BETWEEN 1 AND 30
+             THEN u.user_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT u.user_id), 0), 4) AS d30_rate
+  FROM users u
+  LEFT JOIN orders o
+         ON o.user_id = u.user_id
+        AND o.status = 'completed'
+        AND o.pay_time IS NOT NULL
+  WHERE u.register_date >= '2025-01-01'
+    AND u.register_date <= '2025-12-01'
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    WITH pay AS (
+        SELECT user_id, CAST(pay_time AS DATE) AS pd
+        FROM orders
+        WHERE status = 'completed' AND pay_time IS NOT NULL
+    ),
+    base AS (
+        SELECT u.user_id,
+               DATE_FORMAT(u.register_date, '%Y-%m') AS reg_month,
+               DATEDIFF(p.pd, u.register_date) AS dn
+        FROM users u
+        LEFT JOIN pay p ON p.user_id = u.user_id
+        WHERE u.register_date >= '2025-01-01'
+          AND u.register_date <= '2025-12-01'
+    )
+    SELECT reg_month,
+           COUNT(DISTINCT user_id) AS reg_users,
+           ROUND(COUNT(DISTINCT CASE WHEN dn = 1 THEN user_id END) * 1.0
+               / NULLIF(COUNT(DISTINCT user_id), 0), 4) AS d1_rate,
+           ROUND(COUNT(DISTINCT CASE WHEN dn >= 1 AND dn <= 7 THEN user_id END) * 1.0
+               / NULLIF(COUNT(DISTINCT user_id), 0), 4) AS d7_rate,
+           ROUND(COUNT(DISTINCT CASE WHEN dn >= 1 AND dn <= 30 THEN user_id END) * 1.0
+               / NULLIF(COUNT(DISTINCT user_id), 0), 4) AS d30_rate
+    FROM base
+    GROUP BY reg_month
+    ORDER BY reg_month;
+
+explanation: |
+  1. 一次扫描出多窗口：三个 CASE WHEN 共用同一张 JOIN 结果，避免三次子查询。
+  2. 行为留存 vs 首购留存：本题只要“区间内有支付”，所以直接 JOIN 明细而不是先 MIN。
+  3. 分母恒定：三条曲线共用注册人数分母，才能比较衰减速度。
+
+pitfalls:
+  - JOIN 条件写进 WHERE，LEFT JOIN 退化成 INNER JOIN，分母被截断
+  - D7 写成 BETWEEN 0 AND 7，把注册当天的支付也算进留存
+  - 注册日上界没卡，最后一个月的 D30 天然缺数据，曲线看着“暴跌”
+
+capability_points: [retention.nday, retention.denominator, retention.curve, retention.boundary]

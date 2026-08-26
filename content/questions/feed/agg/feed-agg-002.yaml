@@ -1,0 +1,75 @@
+id: feed-agg-002
+dataset: feed
+scenario: agg
+chain: feed-agg-chain-a
+chain_step: 2
+title: 渠道 × 城市等级的创作者浓度（HAVING 过滤分组）
+
+business_prompt: |
+  创作者运营要找高浓度人群：“按注册渠道和城市等级分组，
+   给我用户数、创作者数和创作者占比。样本太小的组别没参考价值，
+   只保留用户数不少于 500 的组。”
+
+context_notes:
+  - 只用 users 一张表；is_creator 为布尔
+  - 创作者占比 = 创作者数 / 该组用户数，保留 4 位小数
+  - “只保留用户数 >= 500 的组”是对分组结果的过滤，属于 HAVING 而非 WHERE
+
+tables: [users]
+
+expected_columns:
+  - {name: register_channel, type: string}
+  - {name: city_tier, type: int}
+  - {name: user_cnt, type: int}
+  - {name: creator_cnt, type: int}
+  - {name: creator_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 200
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\bhaving\\b"
+      message: 对聚合结果的过滤请用 HAVING
+
+hints:
+  - WHERE 在分组前过滤行，HAVING 在分组后过滤组，本题属于后者。
+  - 布尔列求和：SUM(CASE WHEN is_creator THEN 1 ELSE 0 END)。
+  - 占比记得乘 1.0 再除，避免整数除法。
+
+reference_sql: |
+  SELECT register_channel,
+         city_tier,
+         COUNT(*) AS user_cnt,
+         SUM(CASE WHEN is_creator THEN 1 ELSE 0 END) AS creator_cnt,
+         ROUND(SUM(CASE WHEN is_creator THEN 1 ELSE 0 END) * 1.0
+             / NULLIF(COUNT(*), 0), 4) AS creator_rate
+  FROM users
+  GROUP BY register_channel, city_tier
+  HAVING COUNT(*) >= 500
+  ORDER BY register_channel, city_tier;
+
+alt_solutions:
+  - |
+    SELECT register_channel,
+           city_tier,
+           COUNT(user_id) AS user_cnt,
+           COUNT(CASE WHEN is_creator THEN 1 END) AS creator_cnt,
+           ROUND(COUNT(CASE WHEN is_creator THEN 1 END) * 1.0
+               / NULLIF(COUNT(user_id), 0), 4) AS creator_rate
+    FROM users
+    GROUP BY 1, 2
+    HAVING COUNT(user_id) >= 500
+    ORDER BY 1, 2;
+
+explanation: |
+  1. WHERE → GROUP BY → HAVING → SELECT → ORDER BY 是逻辑执行顺序，HAVING 能引用聚合结果。
+  2. 布尔条件计数有两种等价写法：SUM(CASE ... THEN 1 ELSE 0 END) 与 COUNT(CASE ... THEN 1 END)。
+  3. 占比类指标统一用 NULLIF 保护分母，是可复用的防御习惯。
+
+pitfalls:
+  - 把 COUNT(*) >= 500 写进 WHERE，MySQL 会直接报错
+  - COUNT(CASE WHEN ... THEN 1 ELSE 0 END) 加了 ELSE 0，计数变成全量
+  - 整数相除得到 0（MySQL 中整数除法会退化），忘记乘 1.0
+
+capability_points: [agg.multi_dim, agg.having, agg.conditional_count, agg.safe_div]

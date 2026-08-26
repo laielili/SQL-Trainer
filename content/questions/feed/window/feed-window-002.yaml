@@ -1,0 +1,87 @@
+id: feed-window-002
+dataset: feed
+scenario: window
+chain: feed-window-chain-a
+chain_step: 2
+title: 高产作者的发布节奏（相邻发布间隔）
+
+business_prompt: |
+  创作者激励要找“稳定高产”的人：“对每位作者，按发布时间排序算出相邻两篇的间隔天数，
+   然后统计他的间隔次数、平均间隔和最长间隔。只看有 5 次以上间隔的作者，
+   按平均间隔从小到大给我前 20 个。”
+
+context_notes:
+  - 只用 contents 表；间隔 = 本篇 publish_time 与上一篇 publish_time 的天数差
+  - 第一篇没有上一篇，间隔为 NULL，应被排除
+  - 平均间隔保留 2 位小数；平均间隔相同时按 author_id 升序，取前 20
+
+tables: [contents]
+
+expected_columns:
+  - {name: author_id, type: int}
+  - {name: gap_cnt, type: int}
+  - {name: avg_gap_days, type: decimal, tolerance: 0.01}
+  - {name: max_gap_days, type: int}
+
+order_sensitive: true
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\blag\\s*\\("
+      message: 相邻行取值请用 LAG 窗口函数
+
+hints:
+  - 第一步：LAG(publish_time) OVER (PARTITION BY author_id ORDER BY publish_time)。
+  - 第二步：DATEDIFF(本篇, 上一篇) 得到间隔天数，NULL 的行过滤掉。
+  - 第三步：按作者聚合，HAVING COUNT(*) >= 5，最后 ORDER BY + LIMIT。
+
+reference_sql: |
+  WITH pub AS (
+      SELECT author_id,
+             publish_time,
+             LAG(publish_time) OVER (PARTITION BY author_id ORDER BY publish_time) AS prev_pub
+      FROM contents
+  )
+  SELECT author_id,
+         COUNT(*) AS gap_cnt,
+         ROUND(AVG(DATEDIFF(publish_time, prev_pub)), 2) AS avg_gap_days,
+         MAX(DATEDIFF(publish_time, prev_pub)) AS max_gap_days
+  FROM pub
+  WHERE prev_pub IS NOT NULL
+  GROUP BY author_id
+  HAVING COUNT(*) >= 5
+  ORDER BY avg_gap_days ASC, author_id ASC
+  LIMIT 20;
+
+alt_solutions:
+  - |
+    WITH pub AS (
+        SELECT author_id,
+               DATEDIFF(publish_time,
+                        LAG(publish_time) OVER (PARTITION BY author_id ORDER BY publish_time)
+               ) AS gap_days
+        FROM contents
+    )
+    SELECT author_id,
+           COUNT(gap_days) AS gap_cnt,
+           ROUND(AVG(gap_days), 2) AS avg_gap_days,
+           MAX(gap_days) AS max_gap_days
+    FROM pub
+    WHERE gap_days IS NOT NULL
+    GROUP BY author_id
+    HAVING COUNT(gap_days) >= 5
+    ORDER BY avg_gap_days, author_id
+    LIMIT 20;
+
+explanation: |
+  1. “相邻两条记录的差”是 LAG 的经典用途，等价于自连接但代价低得多。
+  2. 窗口函数与聚合函数分属两层：先开窗算出每行的间隔，再聚合成作者级指标。
+  3. 排序必须给出唯一的 tie-breaker（author_id），否则 LIMIT 20 的结果不确定。
+
+pitfalls:
+  - 忘记 PARTITION BY author_id，间隔跨作者串味
+  - 不过滤 prev_pub IS NULL，AVG 虽会忽略 NULL 但 COUNT(*) 会多算一次
+  - ORDER BY 只写 avg_gap_days，并列时前 20 名不稳定
+
+capability_points: [window.lag, window.partition, agg.having, window.tie_breaker]

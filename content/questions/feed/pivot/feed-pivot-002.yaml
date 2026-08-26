@@ -1,0 +1,97 @@
+id: feed-pivot-002
+dataset: feed
+scenario: pivot
+chain: feed-pivot-chain-a
+chain_step: 2
+title: 分类互动指标宽转长
+
+business_prompt: |
+  指标平台要灌数：“2025 年按话题分类，把点赞数、评论数、转发数三个指标
+   拆成『分类 / 指标名 / 指标值』的长表，指标名用 like_cnt / comment_cnt / share_cnt。”
+
+context_notes:
+  - 事件类型对应关系：like → like_cnt，comment → comment_cnt，share → share_cnt
+  - 指标值是事件条数（不是去重人数）
+  - 结果按分类名、指标名排序
+
+tables: [events, contents, topics]
+
+expected_columns:
+  - {name: category, type: string}
+  - {name: metric_name, type: string}
+  - {name: metric_value, type: int}
+
+order_sensitive: false
+row_limit: 500
+
+constraints:
+  must_match:
+    - pattern: "(?is)union\\s+all"
+      message: 宽转长请用 UNION ALL 展开各指标
+
+hints:
+  - 先聚合出一张宽表（分类 + 三列计数），再用三段 UNION ALL 把它拆开。
+  - 常量列 'like_cnt' AS metric_name 承载原来的列名。
+  - 三段的列数、顺序、类型必须严格一致。
+
+reference_sql: |
+  WITH base AS (
+      SELECT t.category,
+             SUM(CASE WHEN e.event_name = 'like'    THEN 1 ELSE 0 END) AS like_cnt,
+             SUM(CASE WHEN e.event_name = 'comment' THEN 1 ELSE 0 END) AS comment_cnt,
+             SUM(CASE WHEN e.event_name = 'share'   THEN 1 ELSE 0 END) AS share_cnt
+      FROM events e
+      JOIN contents c ON c.content_id = e.content_id
+      JOIN topics   t ON t.topic_id  = c.topic_id
+      WHERE e.event_name IN ('like', 'comment', 'share')
+        AND e.event_time >= '2025-01-01'
+        AND e.event_time <  '2026-01-01'
+      GROUP BY t.category
+  )
+  SELECT category, 'like_cnt' AS metric_name, like_cnt AS metric_value FROM base
+  UNION ALL
+  SELECT category, 'comment_cnt', comment_cnt FROM base
+  UNION ALL
+  SELECT category, 'share_cnt', share_cnt FROM base
+  ORDER BY category, metric_name;
+
+alt_solutions:
+  - |
+    SELECT t.category,
+           'like_cnt' AS metric_name,
+           COUNT(*) AS metric_value
+    FROM events e
+    JOIN contents c ON c.content_id = e.content_id
+    JOIN topics   t ON t.topic_id  = c.topic_id
+    WHERE e.event_name = 'like'
+      AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+    GROUP BY t.category
+    UNION ALL
+    SELECT t.category, 'comment_cnt', COUNT(*)
+    FROM events e
+    JOIN contents c ON c.content_id = e.content_id
+    JOIN topics   t ON t.topic_id  = c.topic_id
+    WHERE e.event_name = 'comment'
+      AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+    GROUP BY t.category
+    UNION ALL
+    SELECT t.category, 'share_cnt', COUNT(*)
+    FROM events e
+    JOIN contents c ON c.content_id = e.content_id
+    JOIN topics   t ON t.topic_id  = c.topic_id
+    WHERE e.event_name = 'share'
+      AND e.event_time >= '2025-01-01' AND e.event_time < '2026-01-01'
+    GROUP BY t.category
+    ORDER BY category, metric_name;
+
+explanation: |
+  1. 宽转长把“列名”变成数据，指标平台/BI 工具通常要求这种长表结构。
+  2. 先聚合一次再拆（reference）只扫一遍事实表；分三段各自聚合（alt）要扫三遍。
+  3. 两种写法结果一致，但在大表上性能差距明显，是值得建立的直觉。
+
+pitfalls:
+  - 用 UNION 代替 UNION ALL，恰好相等的 (分类, 指标值) 行被去重
+  - 分三段写时漏掉某一段的时间过滤，量级对不上
+  - 常量列忘了起别名，列名变成 "'like_cnt'" 之类
+
+capability_points: [pivot.wide2long, pivot.union_all, pivot.scan_cost]

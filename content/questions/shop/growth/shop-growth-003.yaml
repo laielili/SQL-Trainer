@@ -1,0 +1,104 @@
+id: shop-growth-003
+dataset: shop
+scenario: growth
+chain: shop-growth-chain-a
+chain_step: 3
+title: YTD 累计 GMV 与累计同比
+
+business_prompt: |
+  CFO 只看累计口径：“2025 年逐月给我『年初至今累计 GMV』，
+   以及 2024 年同期的累计 GMV 和累计同比增长率。”
+
+context_notes:
+  - YTD = 从当年 1 月累计到本月（含本月）
+  - GMV 口径同前：order_items.item_amount，排除 cancelled/refunded，pay_time 非空
+  - 累计用窗口函数 SUM(...) OVER (PARTITION BY 年 ORDER BY 月)，不要自己写 12 段 UNION
+
+tables: [orders, order_items]
+
+expected_columns:
+  - {name: mon, type: int}
+  - {name: ytd_2025, type: decimal, tolerance: 0.01}
+  - {name: ytd_2024, type: decimal, tolerance: 0.01}
+  - {name: ytd_yoy_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 500
+
+constraints:
+  must_match:
+    - pattern: "(?is)\\bover\\s*\\("
+      message: 累计值请用窗口函数 SUM(...) OVER (...) 实现
+
+hints:
+  - 第一步还是月表 (y, m, gmv)。
+  - 第二步在月表上加一列 SUM(gmv) OVER (PARTITION BY y ORDER BY m) 得到 YTD。
+  - 第三步把 YTD 月表跟自己错一年 JOIN，算累计同比。
+
+reference_sql: |
+  WITH monthly AS (
+      SELECT YEAR(o.order_time) AS y,
+             MONTH(o.order_time) AS m,
+             SUM(oi.item_amount) AS gmv
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status NOT IN ('cancelled', 'refunded')
+        AND o.pay_time IS NOT NULL
+      GROUP BY 1, 2
+  ),
+  ytd AS (
+      SELECT y, m,
+             SUM(gmv) OVER (PARTITION BY y ORDER BY m
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ytd_gmv
+      FROM monthly
+  )
+  SELECT cur.m AS mon,
+         cur.ytd_gmv AS ytd_2025,
+         prev.ytd_gmv AS ytd_2024,
+         ROUND((cur.ytd_gmv - prev.ytd_gmv) / NULLIF(prev.ytd_gmv, 0), 4) AS ytd_yoy_rate
+  FROM ytd cur
+  LEFT JOIN ytd prev
+         ON prev.m = cur.m
+        AND prev.y = cur.y - 1
+  WHERE cur.y = 2025
+  ORDER BY cur.m;
+
+alt_solutions:
+  - |
+    WITH monthly AS (
+        SELECT YEAR(o.order_time) AS y,
+               MONTH(o.order_time) AS m,
+               SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        WHERE o.pay_time IS NOT NULL
+          AND o.status NOT IN ('cancelled', 'refunded')
+        GROUP BY 1, 2
+    ),
+    ytd AS (
+        SELECT y, m,
+               SUM(gmv) OVER (PARTITION BY y ORDER BY m) AS ytd_gmv
+        FROM monthly
+    )
+    SELECT a.m AS mon,
+           MAX(CASE WHEN a.y = 2025 THEN a.ytd_gmv END) AS ytd_2025,
+           MAX(CASE WHEN a.y = 2024 THEN a.ytd_gmv END) AS ytd_2024,
+           ROUND((MAX(CASE WHEN a.y = 2025 THEN a.ytd_gmv END)
+                - MAX(CASE WHEN a.y = 2024 THEN a.ytd_gmv END))
+               / NULLIF(MAX(CASE WHEN a.y = 2024 THEN a.ytd_gmv END), 0), 4) AS ytd_yoy_rate
+    FROM ytd a
+    WHERE a.y IN (2024, 2025)
+    GROUP BY a.m
+    ORDER BY a.m;
+
+explanation: |
+  1. 累计 = 有序窗口的“从头到当前行”求和，默认窗口框架就是 UNBOUNDED PRECEDING ~ CURRENT ROW。
+  2. PARTITION BY y 保证跨年时累计重新归零，否则 2025 年的 YTD 会把 2024 年也累进去。
+  3. 累计同比与单月同比同构，都是“错一年对齐”，区别只在被对齐的度量。
+
+pitfalls:
+  - 忘记 PARTITION BY y，累计跨年不归零
+  - ORDER BY 写成 ORDER BY gmv，累计顺序变成按金额而非按月
+  - 用 SUM(gmv) OVER () 无排序，得到的是全年总和而非累计
+
+capability_points: [growth.ytd, growth.yoy, growth.window_frame, growth.safe_div]

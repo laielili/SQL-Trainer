@@ -1,0 +1,85 @@
+id: saas-retention-002
+dataset: saas
+scenario: retention
+chain: saas-retention-chain-a
+chain_step: 2
+title: 订阅分群的 90 日流失率与存活率
+
+business_prompt: |
+  收入团队要看早期流失：“按订阅开始月分群，统计订阅数、
+   开始后 90 天内就结束的订阅数、90 日流失率和存活率。”
+
+context_notes:
+  - 订阅结束 = end_date 非空；生效中的订阅 end_date 为 NULL
+  - 90 日流失 = end_date 非空 且 DATEDIFF(end_date, start_date) <= 90
+  - 存活率 = 1 - 流失率；分群范围 2024-01-01 ~ 2025-10-01（保证 90 天窗口完整）
+
+tables: [subscriptions]
+
+expected_columns:
+  - {name: start_month, type: string}
+  - {name: sub_cnt, type: int}
+  - {name: churn_90d, type: int}
+  - {name: churn_90d_rate, type: decimal, tolerance: 0.0001}
+  - {name: survive_90d_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 只用一张表就能做完，重点是把“90 天内结束”翻译成 CASE 条件。
+  - end_date 为 NULL 表示还在生效，不算流失。
+  - 存活率直接用 1 - 流失率，注意保持同样的小数位。
+
+reference_sql: |
+  SELECT DATE_FORMAT(start_date, '%Y-%m') AS start_month,
+         COUNT(*) AS sub_cnt,
+         SUM(CASE WHEN end_date IS NOT NULL
+                   AND DATEDIFF(end_date, start_date) <= 90
+                  THEN 1 ELSE 0 END) AS churn_90d,
+         ROUND(SUM(CASE WHEN end_date IS NOT NULL
+                         AND DATEDIFF(end_date, start_date) <= 90
+                        THEN 1 ELSE 0 END) * 1.0
+             / NULLIF(COUNT(*), 0), 4) AS churn_90d_rate,
+         ROUND(1 - SUM(CASE WHEN end_date IS NOT NULL
+                             AND DATEDIFF(end_date, start_date) <= 90
+                            THEN 1 ELSE 0 END) * 1.0
+             / NULLIF(COUNT(*), 0), 4) AS survive_90d_rate
+  FROM subscriptions
+  WHERE start_date >= '2024-01-01'
+    AND start_date <= '2025-10-01'
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    WITH tagged AS (
+        SELECT DATE_FORMAT(start_date, '%Y-%m') AS start_month,
+               CASE WHEN end_date IS NOT NULL
+                     AND DATEDIFF(end_date, start_date) <= 90
+                    THEN 1 ELSE 0 END AS is_churn
+        FROM subscriptions
+        WHERE start_date BETWEEN '2024-01-01' AND '2025-10-01'
+    )
+    SELECT start_month,
+           COUNT(*) AS sub_cnt,
+           SUM(is_churn) AS churn_90d,
+           ROUND(SUM(is_churn) * 1.0 / NULLIF(COUNT(*), 0), 4) AS churn_90d_rate,
+           ROUND((COUNT(*) - SUM(is_churn)) * 1.0 / NULLIF(COUNT(*), 0), 4) AS survive_90d_rate
+    FROM tagged
+    GROUP BY start_month
+    ORDER BY start_month;
+
+explanation: |
+  1. 流失是留存的镜像：同一份分群数据，换个方向就是 churn。
+  2. NULL 语义要想清楚：end_date IS NULL 表示“还没结束”，绝不能当成 0 天。
+  3. 存活率既可以 1 - 流失率，也可以直接 (总数 - 流失数)/总数，二者等价。
+
+pitfalls:
+  - 忘记 end_date IS NOT NULL，DATEDIFF 遇 NULL 返回 NULL，CASE 落到 ELSE 反而“正确”，但语义靠运气
+  - 分群上界没卡，最近几个月的 90 天窗口不完整，流失率被系统性低估
+  - 存活率单独重算一遍聚合，与流失率产生舍入不一致
+
+capability_points: [retention.churn, retention.cohort, agg.null_handling, retention.boundary]

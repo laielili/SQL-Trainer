@@ -1,0 +1,87 @@
+id: shop-window-002
+dataset: shop
+scenario: window
+chain: shop-window-chain-a
+chain_step: 2
+title: 2025 Q2 各品类销售额 Top3 商品
+
+business_prompt: |
+  运营同学在群里 @ 你：
+  “大促复盘要用，帮我拉一下 2025 年 Q2 每个一级品类里实付金额排前三的商品，
+   要商品名、品类名、实付金额和名次。金额一样的算并列，并列之后名次别跳号。”
+
+context_notes:
+  - 实付金额指订单明细的 item_amount 之和
+  - 已取消和已退款的订单不计入销售额
+  - 分组 TopN：必须用窗口函数 + 外套 CTE 过滤（MySQL 无 QUALIFY）
+
+tables: [orders, order_items, dim_product]
+
+expected_columns:
+  - {name: cat_l1, type: string}
+  - {name: product_name, type: string}
+  - {name: pay_amount, type: decimal, tolerance: 0.01}
+  - {name: rn, type: int}
+
+order_sensitive: false
+row_limit: 500
+
+constraints:
+  must_match:
+    - pattern: '(?i)\bdense_rank\s*\(\s*\)\s*over\b'
+      reason: 本题要求“并列且不跳号”，精确对应 DENSE_RANK；用 RANK 会在并列后跳号。
+  must_not_match:
+    - pattern: '(?i)\blimit\s+3\b'
+      reason: LIMIT 3 只能取全局前三，无法实现“每个品类各取前三”的分组 TopN。
+
+hints:
+  - 先确认“实付金额”口径：要排除哪些订单状态？
+  - 名次并列且不跳号 —— ROW_NUMBER、RANK、DENSE_RANK 三者选哪个？
+  - MySQL 8.0 没有 QUALIFY，窗口函数算出的名次必须先放进 CTE 或子查询，才能在外层过滤。
+
+reference_sql: |
+  WITH item_amt AS (
+      SELECT p.cat_l1, p.product_name, SUM(oi.item_amount) AS pay_amount
+      FROM order_items oi
+      JOIN orders o    ON o.order_id = oi.order_id
+      JOIN dim_product p ON p.product_id = oi.product_id
+      WHERE o.order_time >= '2025-04-01'
+        AND o.order_time <  '2025-07-01'
+        AND o.status NOT IN ('cancelled', 'refunded')
+      GROUP BY p.cat_l1, p.product_name
+  ),
+  ranked AS (
+      SELECT cat_l1, product_name, pay_amount,
+             DENSE_RANK() OVER (PARTITION BY cat_l1 ORDER BY pay_amount DESC) AS rn
+      FROM item_amt
+  )
+  SELECT cat_l1, product_name, pay_amount, rn
+  FROM ranked
+  WHERE rn <= 3;
+
+alt_solutions:
+  - |
+    SELECT * FROM (
+        SELECT p.cat_l1, p.product_name,
+               SUM(oi.item_amount) AS pay_amount,
+               DENSE_RANK() OVER (PARTITION BY p.cat_l1 ORDER BY SUM(oi.item_amount) DESC) AS rn
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        JOIN dim_product p ON p.product_id = oi.product_id
+        WHERE o.order_time >= '2025-04-01' AND o.order_time < '2025-07-01'
+          AND o.status NOT IN ('cancelled', 'refunded')
+        GROUP BY p.cat_l1, p.product_name
+    ) t WHERE t.rn <= 3;
+
+explanation: |
+  1. 口径：实付金额落到 order_items 粒度求和。
+  2. 排名：并列且不跳号精确对应 DENSE_RANK。
+  3. 过滤：MySQL 无 QUALIFY，必须分层（CTE 或子查询）再 WHERE rn<=3。
+
+pitfalls:
+  - 直接对 orders.pay_amount 求和，多商品订单重复计入每个商品
+  - 忘记排除 cancelled / refunded
+  - 用 RANK 导致并列后名次跳号，Top3 实际只返回 2 个不同名次
+  - 试图在 WHERE 里直接写 DENSE_RANK() <= 3
+
+capability_points: [window.rank_family, window.topn, agg.multi_group]

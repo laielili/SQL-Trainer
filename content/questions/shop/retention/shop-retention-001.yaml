@@ -1,0 +1,99 @@
+id: shop-retention-001
+dataset: shop
+scenario: retention
+chain: shop-retention-chain-a
+chain_step: 1
+title: 按注册日分群的次日留存率
+
+business_prompt: |
+  增长同学要看拉新质量：
+  “按用户注册日期（到天）分群，统计每天注册的人数，
+   以及其中在注册后第 1 天（次日）就完成首次支付的人数和留存率。”
+
+context_notes:
+  - 首次支付 = 该用户 MIN(pay_time) 且 status='completed'
+  - “次日”口径：pay_time 落在 [注册日+1天, 注册日+2天) 区间
+  - 分母用当天注册人数（含从未支付的），因此要 LEFT JOIN 首次支付
+  - 为避免跨年边界把 +1/+2 天推出数据范围，注册日限定在 2025-01-01 ~ 2025-12-30
+
+tables: [users, orders]
+
+expected_columns:
+  - {name: register_date, type: date}
+  - {name: reg_users, type: int}
+  - {name: d1_retained, type: int}
+  - {name: d1_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 1000
+
+constraints: {}
+
+hints:
+  - 先按用户聚合出“首次支付时间”MIN(pay_time)（status='completed'）。
+  - 次日区间用 DATE_ADD(register_date, INTERVAL 1 DAY) 与 INTERVAL 2 DAY 框定。
+  - 分母用注册人数（COUNT DISTINCT user_id），所以 users 要 LEFT JOIN 首次支付，不能 INNER JOIN。
+
+reference_sql: |
+  WITH first_pay AS (
+      SELECT user_id, MIN(pay_time) AS fp_time
+      FROM orders
+      WHERE status = 'completed' AND pay_time IS NOT NULL
+      GROUP BY user_id
+  )
+  SELECT u.register_date,
+         COUNT(DISTINCT u.user_id) AS reg_users,
+         COUNT(DISTINCT CASE
+             WHEN fp.fp_time >= DATE_ADD(u.register_date, INTERVAL 1 DAY)
+              AND fp.fp_time <  DATE_ADD(u.register_date, INTERVAL 2 DAY)
+             THEN u.user_id END) AS d1_retained,
+         ROUND(
+             COUNT(DISTINCT CASE
+                 WHEN fp.fp_time >= DATE_ADD(u.register_date, INTERVAL 1 DAY)
+                  AND fp.fp_time <  DATE_ADD(u.register_date, INTERVAL 2 DAY)
+                 THEN u.user_id END) * 1.0
+             / NULLIF(COUNT(DISTINCT u.user_id), 0),
+         4) AS d1_rate
+  FROM users u
+  LEFT JOIN first_pay fp ON fp.user_id = u.user_id
+  WHERE u.register_date >= '2025-01-01'
+    AND u.register_date <= '2025-12-30'
+  GROUP BY u.register_date
+  ORDER BY u.register_date;
+
+alt_solutions:
+  - |
+    WITH first_pay AS (
+        SELECT user_id, MIN(pay_time) AS fp_time
+        FROM orders
+        WHERE status = 'completed' AND pay_time IS NOT NULL
+        GROUP BY user_id
+    )
+    SELECT u.register_date,
+           COUNT(DISTINCT u.user_id) AS reg_users,
+           COUNT(DISTINCT CASE
+               WHEN fp.fp_time BETWEEN u.register_date + INTERVAL 1 DAY
+                                    AND u.register_date + INTERVAL 1 DAY + INTERVAL 23 HOUR
+               THEN u.user_id END) AS d1_retained,
+           ROUND(COUNT(DISTINCT CASE
+               WHEN fp.fp_time >= u.register_date + INTERVAL 1 DAY
+                AND fp.fp_time <  u.register_date + INTERVAL 2 DAY
+               THEN u.user_id END) * 1.0
+               / NULLIF(COUNT(DISTINCT u.user_id), 0), 4) AS d1_rate
+    FROM users u
+    LEFT JOIN first_pay fp ON fp.user_id = u.user_id
+    WHERE u.register_date >= '2025-01-01' AND u.register_date <= '2025-12-30'
+    GROUP BY u.register_date
+    ORDER BY u.register_date;
+
+explanation: |
+  1. 锚点：每个用户的首次支付时间用 MIN(pay_time) 聚合。
+  2. 口径：次日 = [注册日+1, 注册日+2)，用半开区间避免边界重复/遗漏。
+  3. 分母：LEFT JOIN 保住未支付用户，COUNT(DISTINCT user_id) 作分母，NULLIF 防除零。
+
+pitfalls:
+  - 用 INNER JOIN first_pay，分母变成“有支付的人”，留存率恒为 1 或失真
+  - 次日区间写错（如用 <= 注册日+1 天，把当天也算进去）
+  - 注册日没有限定上界，+1/+2 天推到 2026 之后无数据，分母分母错配
+
+capability_points: [retention.anchor, retention.cohort, retention.nday, retention.denominator]

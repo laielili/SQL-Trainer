@@ -1,0 +1,192 @@
+dataset: feed
+tables:
+- name: dim_date
+  comment: 日期维表（连续 2024-01-01 ~ 2025-12-31，含闰年）
+  columns:
+  - name: date_key
+    type: DATE
+    comment: ''
+    pk: true
+  - name: y
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: q
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: m
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: w
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: dow
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: is_weekend
+    type: BOOLEAN
+    comment: ''
+    pk: false
+  - name: is_holiday
+    type: BOOLEAN
+    comment: ''
+    pk: false
+  - name: last_year_same_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: prev_month_date
+    type: DATE
+    comment: ''
+    pk: false
+- name: users
+  comment: 用户表
+  columns:
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: register_date
+    type: DATE
+    comment: ''
+    pk: false
+  - name: register_channel
+    type: VARCHAR
+    comment: app / web / mini_program / ad / organic
+    pk: false
+    enum:
+    - app
+    - web
+    - mini_program
+    - ad
+    - organic
+  - name: city_tier
+    type: INTEGER
+    comment: 1 / 2 / 3 / 4
+    pk: false
+    enum:
+    - '1'
+    - '2'
+    - '3'
+    - '4'
+  - name: is_creator
+    type: BOOLEAN
+    comment: 是否创作者
+    pk: false
+- name: topics
+  comment: 话题表
+  columns:
+  - name: topic_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: topic_name
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: category
+    type: VARCHAR
+    comment: 娱乐 / 知识 / 游戏 / 美食 / 旅行 / 财经
+    pk: false
+    enum:
+    - 娱乐
+    - 知识
+    - 游戏
+    - 美食
+    - 旅行
+    - 财经
+- name: contents
+  comment: 内容表
+  columns:
+  - name: content_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: author_id
+    type: INTEGER
+    comment: 引用 users.user_id
+    pk: false
+  - name: publish_time
+    type: TIMESTAMP
+    comment: ''
+    pk: false
+  - name: topic_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: content_type
+    type: VARCHAR
+    comment: short_video / article / live / image
+    pk: false
+    enum:
+    - short_video
+    - article
+    - live
+    - image
+  - name: duration_sec
+    type: INTEGER
+    comment: 时长（秒），live/short_video 较大
+    pk: false
+- name: events
+  comment: 埋点事件表
+  columns:
+  - name: event_id
+    type: INTEGER
+    comment: ''
+    pk: true
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: session_id
+    type: VARCHAR
+    comment: ''
+    pk: false
+  - name: event_time
+    type: TIMESTAMP
+    comment: ''
+    pk: false
+  - name: event_name
+    type: VARCHAR
+    comment: impression/click/play/finish/like/comment/share/follow
+    pk: false
+    enum:
+    - impression
+    - click
+    - play
+    - finish
+    - like
+    - comment
+    - share
+    - follow
+  - name: content_id
+    type: INTEGER
+    comment: click/play/finish/like/comment/share 有值；follow/impression 为 NULL
+    pk: false
+  - name: stay_sec
+    type: INTEGER
+    comment: play/finish 的停留秒数；其余为 NULL
+    pk: false
+- name: daily_active
+  comment: 日活快照
+  columns:
+  - name: stat_date
+    type: DATE
+    comment: 统计日期
+    pk: false
+  - name: user_id
+    type: INTEGER
+    comment: ''
+    pk: false
+  - name: active_minutes
+    type: INTEGER
+    comment: 当日活跃分钟数
+    pk: false
+  - name: is_new
+    type: BOOLEAN
+    comment: 是否当日新增活跃
+    pk: false

@@ -1,0 +1,93 @@
+id: saas-funnel-001
+dataset: saas
+scenario: funnel
+chain: saas-funnel-chain-a
+chain_step: 1
+title: 获客漏斗 注册→试用→转化→回款
+
+business_prompt: |
+  增长要端到端漏斗：“统计四步账号数——注册、开始试用、试用转化、
+   转化后产生过已回款发票。每一步都必须是走通了前面所有步的账号。”
+
+context_notes:
+  - 注册 = accounts 全量；试用 = trial_conversion 有记录；转化 = converted 为真
+  - 回款 = invoices 中存在 paid = TRUE 的发票
+  - 第 4 步的口径是“已转化 且 有回款”，不是“有回款”
+
+tables: [accounts, trial_conversion, invoices]
+
+expected_columns:
+  - {name: step_no, type: int}
+  - {name: step_name, type: string}
+  - {name: account_cnt, type: int}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_match:
+    - pattern: "(?is)union\\s+all"
+      message: 四步逐层收窄，请用 UNION ALL 拼成四行
+
+hints:
+  - 先给每个账号打三个标记位（是否试用 / 是否转化 / 是否有回款）。
+  - 打标时全部用 LEFT JOIN，否则账号会在第一步就被过滤掉。
+  - 后面每一步的条件都要包含前面所有步，漏斗才单调递减。
+
+reference_sql: |
+  WITH paid_acc AS (
+      SELECT DISTINCT account_id
+      FROM invoices
+      WHERE paid
+  ),
+  base AS (
+      SELECT a.account_id,
+             CASE WHEN tc.account_id IS NOT NULL THEN 1 ELSE 0 END AS s2,
+             CASE WHEN tc.converted THEN 1 ELSE 0 END AS s3,
+             CASE WHEN p.account_id IS NOT NULL THEN 1 ELSE 0 END AS s4
+      FROM accounts a
+      LEFT JOIN trial_conversion tc ON tc.account_id = a.account_id
+      LEFT JOIN paid_acc p          ON p.account_id  = a.account_id
+  )
+  SELECT 1 AS step_no, 'signup' AS step_name, COUNT(*) AS account_cnt FROM base
+  UNION ALL
+  SELECT 2, 'trial_start', SUM(s2) FROM base
+  UNION ALL
+  SELECT 3, 'trial_convert', SUM(CASE WHEN s2 = 1 AND s3 = 1 THEN 1 ELSE 0 END) FROM base
+  UNION ALL
+  SELECT 4, 'paid_invoice', SUM(CASE WHEN s2 = 1 AND s3 = 1 AND s4 = 1 THEN 1 ELSE 0 END) FROM base
+  ORDER BY step_no;
+
+alt_solutions:
+  - |
+    WITH base AS (
+        SELECT a.account_id,
+               CASE WHEN tc.account_id IS NOT NULL THEN 1 ELSE 0 END AS s2,
+               CASE WHEN tc.converted THEN 1 ELSE 0 END AS s3,
+               CASE WHEN EXISTS (
+                   SELECT 1 FROM invoices i
+                   WHERE i.account_id = a.account_id AND i.paid
+               ) THEN 1 ELSE 0 END AS s4
+        FROM accounts a
+        LEFT JOIN trial_conversion tc ON tc.account_id = a.account_id
+    )
+    SELECT 1 AS step_no, 'signup' AS step_name, COUNT(account_id) AS account_cnt FROM base
+    UNION ALL
+    SELECT 2, 'trial_start',   SUM(s2) FROM base
+    UNION ALL
+    SELECT 3, 'trial_convert', SUM(s2 * s3) FROM base
+    UNION ALL
+    SELECT 4, 'paid_invoice',  SUM(s2 * s3 * s4) FROM base
+    ORDER BY step_no;
+
+explanation: |
+  1. B 端漏斗的主体是账号，先“打标”再“逐层收窄”是最清晰的写法。
+  2. 标记位相乘（alt 写法）等价于条件层层 AND，代码更短。
+  3. EXISTS 子查询与 DISTINCT + LEFT JOIN 等价，前者在大表上通常更快。
+
+pitfalls:
+  - 第 4 步只判断“有回款”，没继承前三步，出现漏斗回升
+  - 用 INNER JOIN trial_conversion，第 1 步的注册数直接变成试用数
+  - CASE WHEN tc.converted 忘了处理 NULL（无试用记录时为 NULL），靠 ELSE 0 兜住
+
+capability_points: [funnel.ordered, funnel.flag_then_narrow, funnel.monotonic, agg.left_join_preserve]

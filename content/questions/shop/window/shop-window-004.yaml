@@ -1,0 +1,68 @@
+id: shop-window-004
+dataset: shop
+scenario: window
+chain: shop-window-chain-a
+chain_step: 4
+title: 每个用户相邻两笔订单金额差
+
+business_prompt: |
+  用户运营想看消费节奏：“给我每个用户每一笔已完成订单的实付金额，以及和上一次订单的金额差
+   （当前 - 上一次）。第一笔订单没有‘上一次’，差应为 NULL。”
+
+context_notes:
+  - 只看 status='completed' 且 pay_time 非空的订单
+  - 上一次 = LAG(pay_amount) 按 user_id 分区、pay_time 排序
+  - 首笔的 LAG 为 NULL，差值也应为 NULL
+
+tables: [orders]
+
+expected_columns:
+  - {name: user_id, type: int}
+  - {name: pay_time, type: timestamp}
+  - {name: pay_amount, type: decimal, tolerance: 0.01}
+  - {name: prev_amount, type: decimal, tolerance: 0.01}
+  - {name: diff, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 2000
+
+constraints: {}
+
+hints:
+  - 用 LAG(pay_amount) OVER (PARTITION BY user_id ORDER BY pay_time) 取上一笔金额。
+  - 差值 = pay_amount - LAG(pay_amount)；首笔 LAG 为 NULL，结果 NULL。
+  - ORDER BY 加 order_id 次要键保证稳定。
+
+reference_sql: |
+  WITH paid AS (
+      SELECT user_id, pay_time, pay_amount, order_id
+      FROM orders
+      WHERE status = 'completed' AND pay_time IS NOT NULL
+  )
+  SELECT user_id, pay_time, pay_amount,
+         LAG(pay_amount) OVER (PARTITION BY user_id ORDER BY pay_time, order_id) AS prev_amount,
+         pay_amount - LAG(pay_amount) OVER (PARTITION BY user_id ORDER BY pay_time, order_id) AS diff
+  FROM paid
+  ORDER BY user_id, pay_time;
+
+alt_solutions:
+  - |
+    SELECT user_id, pay_time, pay_amount,
+           LAG(pay_amount) OVER w AS prev_amount,
+           pay_amount - LAG(pay_amount) OVER w AS diff
+    FROM orders
+    WHERE status = 'completed' AND pay_time IS NOT NULL
+    WINDOW w AS (PARTITION BY user_id ORDER BY pay_time, order_id)
+    ORDER BY user_id, pay_time;
+
+explanation: |
+  1. LAG：取同用户上一行的 pay_amount。
+  2. 差值：当前 - LAG，首笔 LAG 为 NULL 自动传播为 NULL。
+  3. 命名窗口 WINDOW 子句可复用同一个窗口定义（alt 示例）。
+
+pitfalls:
+  - 用 (pay_amount - prev) 但 prev 来自自连接，逻辑复杂易错
+  - 忘记 PARTITION BY user_id，跨用户取上一笔
+  - 未加次要排序键导致相同 pay_time 顺序不稳定
+
+capability_points: [window.lag_lead, window.rank_family]

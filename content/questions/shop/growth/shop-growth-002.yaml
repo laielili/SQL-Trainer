@@ -1,0 +1,92 @@
+id: shop-growth-002
+dataset: shop
+scenario: growth
+chain: shop-growth-chain-a
+chain_step: 2
+title: 2025 年逐月 GMV 同比（对齐去年同月）
+
+business_prompt: |
+  年终复盘：“把 2025 年 1~12 月的实付 GMV，跟 2024 年同月做对比，
+   给我月份、今年、去年、同比增长率四列，按月份升序。”
+
+context_notes:
+  - GMV = order_items.item_amount 之和；排除 cancelled/refunded，且 pay_time 非空
+  - 同比 = (今年同月 - 去年同月) / 去年同月；基期为 0 或缺失时返回 NULL
+  - mon 输出 1~12 的整数（不是 '2025-01' 字符串）
+
+tables: [orders, order_items]
+
+expected_columns:
+  - {name: mon, type: int}
+  - {name: gmv_2025, type: decimal, tolerance: 0.01}
+  - {name: gmv_2024, type: decimal, tolerance: 0.01}
+  - {name: yoy_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 500
+
+constraints: {}
+
+hints:
+  - 先聚合出一张 (年, 月, GMV) 的月表，同比就是这张表跟它自己错一年 JOIN。
+  - 自连接条件是 prev.m = cur.m AND prev.y = cur.y - 1，别写成 y - 1 在等号左边。
+  - 也可以用 LAG(gmv, 12) OVER (ORDER BY y, m)，前提是月份连续无缺。
+
+reference_sql: |
+  WITH monthly AS (
+      SELECT YEAR(o.order_time) AS y,
+             MONTH(o.order_time) AS m,
+             SUM(oi.item_amount) AS gmv
+      FROM order_items oi
+      JOIN orders o ON o.order_id = oi.order_id
+      WHERE o.status NOT IN ('cancelled', 'refunded')
+        AND o.pay_time IS NOT NULL
+      GROUP BY 1, 2
+  )
+  SELECT cur.m AS mon,
+         cur.gmv AS gmv_2025,
+         prev.gmv AS gmv_2024,
+         ROUND((cur.gmv - prev.gmv) / NULLIF(prev.gmv, 0), 4) AS yoy_rate
+  FROM monthly cur
+  LEFT JOIN monthly prev
+         ON prev.m = cur.m
+        AND prev.y = cur.y - 1
+  WHERE cur.y = 2025
+  ORDER BY cur.m;
+
+alt_solutions:
+  - |
+    WITH monthly AS (
+        SELECT YEAR(o.order_time) AS y,
+               MONTH(o.order_time) AS m,
+               SUM(oi.item_amount) AS gmv
+        FROM order_items oi
+        JOIN orders o ON o.order_id = oi.order_id
+        WHERE o.status NOT IN ('cancelled', 'refunded')
+          AND o.pay_time IS NOT NULL
+        GROUP BY 1, 2
+    ),
+    lagged AS (
+        SELECT y, m, gmv,
+               LAG(gmv, 12) OVER (ORDER BY y, m) AS ly_gmv
+        FROM monthly
+    )
+    SELECT m AS mon,
+           gmv AS gmv_2025,
+           ly_gmv AS gmv_2024,
+           ROUND((gmv - ly_gmv) / NULLIF(ly_gmv, 0), 4) AS yoy_rate
+    FROM lagged
+    WHERE y = 2025
+    ORDER BY m;
+
+explanation: |
+  1. 同比的本质是“错一年对齐”，两种主流写法：自连接对齐，或 LAG(n=周期长度)。
+  2. 自连接更稳：即使某年缺月也不会错位；LAG(12) 依赖月份连续。
+  3. 安全除法：NULLIF(基期, 0) 保证基期为 0 时返回 NULL 而不是报错。
+
+pitfalls:
+  - 用 LAG(gmv, 12) 但月份有缺失，错位对到了错误的月
+  - 自连接用 INNER JOIN，去年没数据的月份整行消失
+  - 忘记 WHERE cur.y = 2025，把 2024 年也输出了
+
+capability_points: [growth.yoy, growth.self_join, growth.safe_div, growth.window_offset]

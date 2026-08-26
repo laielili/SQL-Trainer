@@ -1,0 +1,81 @@
+id: saas-pivot-001
+dataset: saas
+scenario: pivot
+chain: saas-pivot-chain-a
+chain_step: 1
+title: 行业 × 套餐 活跃账号数交叉表
+
+business_prompt: |
+  产品定价要看分布：“行是行业，列是 free / starter / pro / enterprise 四档套餐，
+   格子里是该行业里持有该档 active 订阅的去重账号数，最后一列是该行业的活跃账号总数。”
+
+context_notes:
+  - 只看 status='active' 的订阅
+  - 一个账号可能同时持有多档订阅，所以每列都要 COUNT(DISTINCT account_id)
+  - total_accounts 是该行业持有任意 active 订阅的去重账号数，通常小于四列之和
+
+tables: [accounts, subscriptions]
+
+expected_columns:
+  - {name: industry, type: string}
+  - {name: free_accounts, type: int}
+  - {name: starter_accounts, type: int}
+  - {name: pro_accounts, type: int}
+  - {name: enterprise_accounts, type: int}
+  - {name: total_accounts, type: int}
+
+order_sensitive: false
+row_limit: 100
+
+constraints:
+  must_not_match:
+    - pattern: "(?is)\\bpivot\\b"
+      message: MySQL 没有 PIVOT，请用条件聚合手写列
+
+hints:
+  - 每一列写成 COUNT(DISTINCT CASE WHEN plan='xxx' THEN account_id END)。
+  - 总列不能用四列相加：同一个账号可能出现在多档里，加起来会重复。
+  - 用 INNER JOIN 即可，因为只统计有 active 订阅的账号。
+
+reference_sql: |
+  SELECT a.industry,
+         COUNT(DISTINCT CASE WHEN s.plan = 'free'       THEN a.account_id END) AS free_accounts,
+         COUNT(DISTINCT CASE WHEN s.plan = 'starter'    THEN a.account_id END) AS starter_accounts,
+         COUNT(DISTINCT CASE WHEN s.plan = 'pro'        THEN a.account_id END) AS pro_accounts,
+         COUNT(DISTINCT CASE WHEN s.plan = 'enterprise' THEN a.account_id END) AS enterprise_accounts,
+         COUNT(DISTINCT a.account_id) AS total_accounts
+  FROM accounts a
+  JOIN subscriptions s ON s.account_id = a.account_id
+  WHERE s.status = 'active'
+  GROUP BY a.industry
+  ORDER BY a.industry;
+
+alt_solutions:
+  - |
+    WITH act AS (
+        SELECT a.industry, a.account_id, s.plan
+        FROM subscriptions s
+        JOIN accounts a ON a.account_id = s.account_id
+        WHERE s.status = 'active'
+    )
+    SELECT industry,
+           COUNT(DISTINCT CASE WHEN plan = 'free'       THEN account_id END) AS free_accounts,
+           COUNT(DISTINCT CASE WHEN plan = 'starter'    THEN account_id END) AS starter_accounts,
+           COUNT(DISTINCT CASE WHEN plan = 'pro'        THEN account_id END) AS pro_accounts,
+           COUNT(DISTINCT CASE WHEN plan = 'enterprise' THEN account_id END) AS enterprise_accounts,
+           COUNT(DISTINCT account_id) AS total_accounts
+    FROM act
+    GROUP BY industry
+    ORDER BY industry;
+
+explanation: |
+  1. 交叉表的每个格子就是一个条件聚合，列名由业务枚举值决定。
+  2. 涉及去重时，合计列必须独立去重，不能把各列相加——这是最常见的口径事故。
+  3. COUNT(DISTINCT CASE WHEN ... THEN id END) 是“分维度去重计数”的通用写法。
+
+pitfalls:
+  - total_accounts = free + starter + pro + enterprise，多档账号被重复计数
+  - 用 COUNT(CASE WHEN ...) 忘记 DISTINCT，统计的是订阅数不是账号数
+  - WHERE 里漏掉 status='active'，历史订阅混入
+
+capability_points: [pivot.crosstab, pivot.distinct_count, pivot.total_column]

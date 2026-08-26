@@ -1,0 +1,78 @@
+id: saas-growth-001
+dataset: saas
+scenario: growth
+chain: saas-growth-chain-a
+chain_step: 1
+title: 新签 MRR 月度环比
+
+business_prompt: |
+  收入例会：“按订阅开始月统计新签 MRR（该月新开订阅的 mrr 合计），
+   给出上月值和环比增长率，按月份升序。”
+
+context_notes:
+  - 新签 MRR = 该月 start_date 落在其中的所有订阅的 mrr 之和（不区分状态）
+  - 金额保留 2 位小数，环比保留 4 位小数
+  - 首月无上月，prev_mrr 与 mom_rate 为 NULL
+
+tables: [subscriptions]
+
+expected_columns:
+  - {name: ym, type: string}
+  - {name: new_mrr, type: decimal, tolerance: 0.01}
+  - {name: prev_mrr, type: decimal, tolerance: 0.01}
+  - {name: mom_rate, type: decimal, tolerance: 0.0001}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 先聚合月表，再 LAG，这个套路对所有环比题都适用。
+  - 注意 ROUND 的位置：先 ROUND 成 2 位再 LAG，和先 LAG 再 ROUND，结果可能差一分钱。
+  - 本题要求 new_mrr 与 prev_mrr 都是 2 位小数，环比基于 2 位小数的值计算。
+
+reference_sql: |
+  WITH monthly AS (
+      SELECT DATE_FORMAT(start_date, '%Y-%m') AS ym,
+             ROUND(SUM(mrr), 2) AS new_mrr
+      FROM subscriptions
+      GROUP BY 1
+  )
+  SELECT ym,
+         new_mrr,
+         LAG(new_mrr) OVER (ORDER BY ym) AS prev_mrr,
+         ROUND((new_mrr - LAG(new_mrr) OVER (ORDER BY ym))
+             / NULLIF(LAG(new_mrr) OVER (ORDER BY ym), 0), 4) AS mom_rate
+  FROM monthly
+  ORDER BY ym;
+
+alt_solutions:
+  - |
+    WITH monthly AS (
+        SELECT DATE_FORMAT(start_date, '%Y-%m') AS ym,
+               ROUND(SUM(mrr), 2) AS new_mrr
+        FROM subscriptions
+        GROUP BY 1
+    ),
+    w AS (
+        SELECT ym, new_mrr,
+               LAG(new_mrr) OVER (ORDER BY ym) AS prev_mrr
+        FROM monthly
+    )
+    SELECT ym, new_mrr, prev_mrr,
+           ROUND((new_mrr - prev_mrr) / NULLIF(prev_mrr, 0), 4) AS mom_rate
+    FROM w
+    ORDER BY ym;
+
+explanation: |
+  1. 环比三件套：月表 → LAG 取基期 → 安全除法。换数据集也不变。
+  2. 舍入时机会影响最终小数位，团队内要统一约定（本题在聚合层就 ROUND）。
+  3. 把 LAG 结果落成中间列，可读性和可维护性都更好。
+
+pitfalls:
+  - 在 SELECT 里写三遍 LAG，改口径时漏改其中一处
+  - 忘记 NULLIF，某月新签为 0 时除零报错
+  - ROUND 时机不统一，与财务口径对不上分位
+
+capability_points: [growth.mom, window.lag, growth.safe_div, growth.rounding]

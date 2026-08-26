@@ -1,0 +1,99 @@
+id: shop-pivot-002
+dataset: shop
+scenario: pivot
+chain: shop-pivot-chain-a
+chain_step: 2
+title: 三个金额指标宽转长（UNPIVOT 手写版）
+
+business_prompt: |
+  数据平台要把宽表灌进指标系统：“2025 年按月，把 total_amount、discount_amount、
+   pay_amount 三个指标拆成『月份 / 指标名 / 指标值』三列的长表。”
+
+context_notes:
+  - 只统计 status NOT IN ('cancelled','refunded') 且 pay_time 非空的订单
+  - metric_name 必须精确输出 'total_amount' / 'discount_amount' / 'pay_amount'
+  - MySQL 没有 UNPIVOT，标准做法是三段 UNION ALL
+
+tables: [orders]
+
+expected_columns:
+  - {name: ym, type: string}
+  - {name: metric_name, type: string}
+  - {name: metric_value, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 1000
+
+constraints:
+  must_match:
+    - pattern: "(?is)union\\s+all"
+      message: 宽转长请用 UNION ALL 展开三个指标
+  must_not_match:
+    - pattern: "(?is)\\bunpivot\\b"
+      message: UNPIVOT 是 DuckDB/SQLServer 语法，MySQL 环境下不可用
+
+hints:
+  - 一个指标写一段 SELECT，常量列 'total_amount' AS metric_name 就是“列名变成值”。
+  - 三段的列数、列顺序、列类型必须完全一致，才能 UNION ALL。
+  - 用 UNION ALL 不要用 UNION：后者会去重，把金额恰好相同的行吃掉。
+
+reference_sql: |
+  SELECT DATE_FORMAT(order_time, '%Y-%m') AS ym,
+         'total_amount' AS metric_name,
+         SUM(total_amount) AS metric_value
+  FROM orders
+  WHERE order_time >= '2025-01-01' AND order_time < '2026-01-01'
+    AND status NOT IN ('cancelled', 'refunded')
+    AND pay_time IS NOT NULL
+  GROUP BY 1
+  UNION ALL
+  SELECT DATE_FORMAT(order_time, '%Y-%m') AS ym,
+         'discount_amount' AS metric_name,
+         SUM(discount_amount) AS metric_value
+  FROM orders
+  WHERE order_time >= '2025-01-01' AND order_time < '2026-01-01'
+    AND status NOT IN ('cancelled', 'refunded')
+    AND pay_time IS NOT NULL
+  GROUP BY 1
+  UNION ALL
+  SELECT DATE_FORMAT(order_time, '%Y-%m') AS ym,
+         'pay_amount' AS metric_name,
+         SUM(pay_amount) AS metric_value
+  FROM orders
+  WHERE order_time >= '2025-01-01' AND order_time < '2026-01-01'
+    AND status NOT IN ('cancelled', 'refunded')
+    AND pay_time IS NOT NULL
+  GROUP BY 1
+  ORDER BY ym, metric_name;
+
+alt_solutions:
+  - |
+    WITH base AS (
+        SELECT DATE_FORMAT(order_time, '%Y-%m') AS ym,
+               SUM(total_amount)    AS t,
+               SUM(discount_amount) AS d,
+               SUM(pay_amount)      AS p
+        FROM orders
+        WHERE order_time >= '2025-01-01' AND order_time < '2026-01-01'
+          AND status NOT IN ('cancelled', 'refunded')
+          AND pay_time IS NOT NULL
+        GROUP BY 1
+    )
+    SELECT ym, 'total_amount' AS metric_name, t AS metric_value FROM base
+    UNION ALL
+    SELECT ym, 'discount_amount', d FROM base
+    UNION ALL
+    SELECT ym, 'pay_amount', p FROM base
+    ORDER BY ym, metric_name;
+
+explanation: |
+  1. 宽转长的本质：把“列名”下沉成一列的值，把“列值”下沉成另一列的值。
+  2. 常量列 'xxx' AS metric_name 就是承载原列名的地方。
+  3. 先聚合一次再 UNION ALL（alt 写法）只扫一遍表，比三段各扫一遍高效。
+
+pitfalls:
+  - 用 UNION 而非 UNION ALL，金额相同的行被静默去重
+  - 三段的 SELECT 列顺序不一致，结果串列但不报错
+  - 直接写 UNPIVOT，在 MySQL 环境会被拦截
+
+capability_points: [pivot.wide2long, pivot.union_all, pivot.constant_column]

@@ -1,0 +1,73 @@
+id: saas-agg-002
+dataset: saas
+scenario: agg
+chain: saas-agg-chain-a
+chain_step: 2
+title: 应收账款月度回收率与平均回款天数
+
+business_prompt: |
+  财务要账期健康度：“按开票月份统计发票数、开票金额、已回款金额、回收率，
+   再加一个已回款发票的平均回款天数（回款日 - 开票日）。”
+
+context_notes:
+  - 回收率 = 已回款金额 / 开票金额，保留 4 位小数
+  - 平均回款天数只对 paid = TRUE 的发票计算，未回款的不参与平均
+  - 金额保留 2 位小数，天数保留 2 位小数
+
+tables: [invoices]
+
+expected_columns:
+  - {name: ym, type: string}
+  - {name: invoice_cnt, type: int}
+  - {name: billed_amount, type: decimal, tolerance: 0.01}
+  - {name: paid_amount, type: decimal, tolerance: 0.01}
+  - {name: collect_rate, type: decimal, tolerance: 0.0001}
+  - {name: avg_pay_days, type: decimal, tolerance: 0.01}
+
+order_sensitive: false
+row_limit: 100
+
+constraints: {}
+
+hints:
+  - 已回款金额用 SUM(CASE WHEN paid THEN amount ELSE 0 END)。
+  - 平均回款天数用 AVG(CASE WHEN paid THEN DATEDIFF(pay_date, bill_date) END)，不写 ELSE。
+  - AVG 会自动跳过 NULL，所以“不写 ELSE”正好实现“只对已回款求平均”。
+
+reference_sql: |
+  SELECT DATE_FORMAT(bill_date, '%Y-%m') AS ym,
+         COUNT(*) AS invoice_cnt,
+         ROUND(SUM(amount), 2) AS billed_amount,
+         ROUND(SUM(CASE WHEN paid THEN amount ELSE 0 END), 2) AS paid_amount,
+         ROUND(SUM(CASE WHEN paid THEN amount ELSE 0 END)
+             / NULLIF(SUM(amount), 0), 4) AS collect_rate,
+         ROUND(AVG(CASE WHEN paid THEN DATEDIFF(pay_date, bill_date) END), 2) AS avg_pay_days
+  FROM invoices
+  GROUP BY 1
+  ORDER BY 1;
+
+alt_solutions:
+  - |
+    SELECT DATE_FORMAT(bill_date, '%Y-%m') AS ym,
+           COUNT(invoice_id) AS invoice_cnt,
+           ROUND(SUM(amount), 2) AS billed_amount,
+           ROUND(COALESCE(SUM(CASE WHEN paid THEN amount END), 0), 2) AS paid_amount,
+           ROUND(COALESCE(SUM(CASE WHEN paid THEN amount END), 0)
+               / NULLIF(SUM(amount), 0), 4) AS collect_rate,
+           ROUND(SUM(CASE WHEN paid THEN DATEDIFF(pay_date, bill_date) END) * 1.0
+               / NULLIF(SUM(CASE WHEN paid THEN 1 ELSE 0 END), 0), 2) AS avg_pay_days
+    FROM invoices
+    GROUP BY 1
+    ORDER BY 1;
+
+explanation: |
+  1. “分母全量、分子部分”是比率类指标的通用结构，靠条件聚合区分。
+  2. AVG(CASE WHEN 条件 THEN 值 END) 天然只对满足条件的行求平均——这是 NULL 语义的红利。
+  3. 手写 SUM/COUNT 版平均值时，分母必须是“条件成立的行数”，不能是 COUNT(*)。
+
+pitfalls:
+  - 平均回款天数写成 AVG(CASE WHEN paid THEN ... ELSE 0 END)，未回款按 0 天拉低均值
+  - DATEDIFF 参数顺序写反，得到负数天数
+  - 回收率分母误用已回款笔数而不是开票金额
+
+capability_points: [agg.conditional_agg, agg.avg_null_semantics, agg.safe_div, agg.date_diff]
