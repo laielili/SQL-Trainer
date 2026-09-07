@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SQL 业务场景训练器 · 静态原型</title>
+<link rel="stylesheet" href="assets/css/prototype.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    SQL<span>Trainer</span>
+    <em class="proto-tag" title="纯静态原型：无后端、无数据库">静态原型</em>
+  </div>
+
+  <label class="picker">
+    <span>数据集</span>
+    <select id="datasetSelect"></select>
+  </label>
+
+  <div class="overall" id="overallStat">完成度 —</div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab is-active" data-view="practice">练习</button>
+    <button class="tab" data-view="wrong">错题本<em class="badge" id="wrongBadge">0</em></button>
+    <button class="tab" data-view="srs">今日重练<em class="badge" id="srsBadge">0</em></button>
+    <button class="tab" data-view="overview">进度总览</button>
+  </nav>
+
+  <button class="icon-btn" id="themeToggle" title="切换明暗">◐</button>
+</header>
+
+<div class="notice" id="buildNotice"></div>
+
+<!-- ============ 练习视图 ============ -->
+<main id="view-practice" class="view layout">
+  <aside class="rail" id="scenarioNav"></aside>
+
+  <section class="workspace">
+    <div class="card q-head">
+      <div class="q-meta">
+        <span class="chip chain" id="chainMeta"></span>
+        <span class="chip" id="capChips"></span>
+      </div>
+      <h2 id="qTitle">—</h2>
+      <div class="prompt" id="businessPrompt"></div>
+
+      <details class="fold" id="notesFold">
+        <summary>业务背景补充 <span class="muted" id="notesCount"></span></summary>
+        <ul id="contextNotes"></ul>
+      </details>
+
+      <div class="expected">
+        <span class="lbl">期望输出列</span>
+        <div class="chips" id="expectedCols"></div>
+      </div>
+    </div>
+
+    <div class="editor-row">
+      <div class="card editor-pane">
+        <div class="toolbar">
+          <button class="btn" id="btnRun">运行 <kbd>Ctrl+Enter</kbd></button>
+          <button class="btn primary" id="btnSubmit">提交判题</button>
+          <button class="btn ghost" id="btnHint">提示 <span id="hintCounter">0/3</span></button>
+          <button class="btn ghost" id="btnReveal">参考解</button>
+          <span class="spacer"></span>
+          <button class="btn ghost" id="btnClear">清空</button>
+        </div>
+        <div class="editor-wrap">
+          <pre id="highlight" aria-hidden="true"></pre>
+          <textarea id="sqlEditor" spellcheck="false" placeholder="在此编写 MySQL 8.0 查询…"></textarea>
+        </div>
+      </div>
+
+      <aside class="card schema-pane">
+        <div class="schema-head">
+          <span>Schema</span>
+          <input id="schemaSearch" class="mini-input" placeholder="过滤表 / 字段" />
+        </div>
+        <div class="schema-tip muted">点击表名字段可插入编辑器</div>
+        <div id="schemaTree" class="schema-tree"></div>
+      </aside>
+    </div>
+
+    <div class="card hint-card" id="hintCard" hidden>
+      <div class="card-title">提示<span class="muted" id="hintWarn"></span></div>
+      <ol id="hintList"></ol>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-title">
+        <span class="seg" id="resultSeg">
+          <button class="seg-btn is-active" data-pane="rows">结果集</button>
+          <button class="seg-btn" data-pane="diff">差异对照</button>
+          <button class="seg-btn" data-pane="pipeline">判题流水线</button>
+        </span>
+        <span class="verdict hidden" id="verdictBadge"></span>
+      </div>
+      <div class="feedback" id="feedback"><span class="muted">运行或提交后显示反馈。</span></div>
+      <div class="table-wrap" id="resultTableWrap"></div>
+    </div>
+
+    <div class="card ref-card" id="refCard" hidden>
+      <div class="card-title">MySQL 参考解<span class="muted">与学习者同一条翻译路径执行</span></div>
+      <pre class="code" id="refSql"></pre>
+      <details class="fold" open>
+        <summary>讲解</summary>
+        <div class="prose" id="refExplanation"></div>
+      </details>
+      <details class="fold">
+        <summary>常见坑 <span class="muted" id="pitCount"></span></summary>
+        <ul id="refPitfalls"></ul>
+      </details>
+      <details class="fold">
+        <summary>翻译后 SQL（DuckDB 实际执行）</summary>
+        <pre class="code" id="refTranslated"></pre>
+      </details>
+    </div>
+  </section>
+</main>
+
+<!-- ============ 错题本 ============ -->
+<main id="view-wrong" class="view page" hidden>
+  <div class="page-head">
+    <h2>错题本</h2>
+    <p class="muted">按能力点聚类归因 —— 判定为 FAIL / HARDCODE_SUSPECTED 的提交自动进入这里。</p>
+  </div>
+  <div id="wrongList" class="groups"></div>
+</main>
+
+<!-- ============ 今日重练 ============ -->
+<main id="view-srs" class="view page" hidden>
+  <div class="page-head">
+    <h2>今日重练</h2>
+    <p class="muted">间隔重练 SRS：通过后按 1 / 3 / 7 / 21 / 60 天梯度排期。</p>
+  </div>
+  <div id="srsList" class="groups"></div>
+</main>
+
+<!-- ============ 进度总览 ============ -->
+<main id="view-overview" class="view page" hidden>
+  <div class="page-head">
+    <h2>进度总览</h2>
+    <p class="muted">当前数据集的场景完成度与能力点归因。刷新页面可重置演示状态。</p>
+  </div>
+  <div id="overviewScenarios" class="grid-cards"></div>
+
+  <div class="card">
+    <div class="card-title">能力点掌握度<span class="muted">按题目声明的 capability_points 统计</span></div>
+    <div id="overviewCaps" class="cap-list"></div>
+  </div>
+
+  <details class="card fold-card">
+    <summary>判题反馈码（PRD §7.2）</summary>
+    <table class="grid" id="codeTable"></table>
+  </details>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script src="data/datasets.js"></script>
+<script src="data/questions.js"></script>
+<script src="data/progress.js"></script>
+<script src="assets/js/sql-highlight.js"></script>
+<script src="assets/js/mock-engine.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
